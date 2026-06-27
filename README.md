@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="center">
   <img src="https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/users-round.svg" width="120" alt="Peerly Logo" />
   <h1>✨ Peerly ✨</h1>
@@ -99,3 +100,6 @@ npm run dev
 <div align="center">
   <i>Built with ❤️ for real-time connections.</i>
 </div>
+=======
+# Peerly
+>>>>>>> 64c8e4e63acdac94060c3152cfd48f6860225240
