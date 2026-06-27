@@ -60,7 +60,7 @@ Whether you want to browse anonymously as a guest, or create an account to save 
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/peerly.git
+git clone https://github.com/Yuvansh598/peerly.git
 cd peerly
 ```
 
