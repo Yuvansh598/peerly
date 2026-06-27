@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 <div align="center">
   <img src="https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/users-round.svg" width="120" alt="Peerly Logo" />
   <h1>✨ Peerly ✨</h1>
