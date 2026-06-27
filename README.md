@@ -100,5 +100,3 @@ npm run dev
   <i>Built with ❤️ for real-time connections.</i>
 </div>
 =======
-# Peerly
->>>>>>> 64c8e4e63acdac94060c3152cfd48f6860225240
