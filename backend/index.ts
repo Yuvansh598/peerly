@@ -15,7 +15,7 @@ import RedisStore from "rate-limit-redis";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import nodemailer from "nodemailer";
+
 import { v2 as cloudinary } from "cloudinary";
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
