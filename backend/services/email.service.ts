@@ -35,7 +35,10 @@ export const EmailService = {
     const textContent = `Peerly\n\nYour verification code is: ${otp}\n\nExpires in 10 minutes.\nIgnore if not requested.`;
 
     const payload = {
-      sender: { name: "Peerly", email: "noreply@peerly.app" },
+      sender: { 
+        name: process.env.SENDER_NAME || "Peerly", 
+        email: process.env.SENDER_EMAIL || "yashjain.yj325@gmail.com" 
+      },
       to: [{ email: email }],
       subject: "Your Peerly Verification Code",
       htmlContent: htmlContent,
