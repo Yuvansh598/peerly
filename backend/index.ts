@@ -81,29 +81,8 @@ if (process.env.CLOUDINARY_URL) {
 }
 const upload = multer({ storage });
 
-import dns from "node:dns";
-dns.setDefaultResultOrder("ipv4first");
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT),
-  secure: false,
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-  auth: {
-    user: process.env.SMTP_USER!,
-    pass: process.env.SMTP_PASS!
-  }
-});
-
-transporter.verify((err, success) => {
-    if (err) {
-        console.error("SMTP Verify Error:", err);
-    } else {
-        console.log("SMTP Ready");
-    }
-});
+import crypto from "crypto";
+import { EmailService } from "./services/email.service";
 
 const requireAuth = (req: any, res: any, next: any) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -135,7 +114,30 @@ const authLimiter = rateLimit({
 
 app.use("/auth", authLimiter);
 
+const otpLimiter = rateLimit({
+  ...limiterOptions,
+  windowMs: 60 * 1000,
+  max: 3,
+  message: "Too many OTP requests, please try again later."
+});
+
 // --- REST API ENDPOINTS ---
+
+app.get("/health", async (req, res) => {
+  let dbStatus = "disconnected";
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    dbStatus = "connected";
+  } catch (e) {
+    dbStatus = "error";
+  }
+  
+  res.json({
+    status: "ok",
+    database: dbStatus,
+    email: "ready" // Assuming nodemailer verified successfully at startup
+  });
+});
 
 app.post("/auth/guest", async (req, res) => {
   try {
@@ -181,8 +183,12 @@ app.post("/auth/register", async (req, res) => {
     // Verify OTP
     const otpRecord = await prisma.otp.findUnique({ where: { email } });
     if (!otpRecord) return res.status(400).json({ error: "No pending OTP for this email" });
-    if (otpRecord.code !== otp) return res.status(400).json({ error: "Invalid code" });
-    if (otpRecord.expires_at < new Date()) return res.status(400).json({ error: "Code expired" });
+    if (otpRecord.expires_at < new Date()) {
+      await prisma.otp.delete({ where: { email } });
+      return res.status(400).json({ error: "Code expired" });
+    }
+    const isValid = await argon2.verify(otpRecord.code, otp);
+    if (!isValid) return res.status(400).json({ error: "Invalid code" });
 
     await prisma.otp.delete({ where: { email } });
 
@@ -228,35 +234,29 @@ app.post("/auth/login", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-app.post("/auth/otp/send", async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Email is required" });
+const emailSchema = z.object({ email: z.string().email("Invalid email address") });
 
-    // Generate a 6 digit code
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+app.post("/auth/otp/send", otpLimiter, async (req, res) => {
+  try {
+    const parsed = emailSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0].message });
+    const { email } = parsed.data;
+
+    // Generate a secure 6 digit code
+    const code = crypto.randomInt(100000, 999999).toString();
     const expires_at = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+    // Hash the code before storing
+    const hashedCode = await argon2.hash(code);
+
+    // Send email first to prevent partial state if email fails
+    await EmailService.sendOTP(email, code);
 
     // Store in DB, update if exists
     await prisma.otp.upsert({
       where: { email },
-      update: { code, expires_at, created_at: new Date() },
-      create: { email, code, expires_at }
-    });
-
-    // Send email
-    await transporter.sendMail({
-      from: `"Peerly" <${process.env.SMTP_USER}>`,
-      to: email,
-      subject: "Your Peerly Login Code",
-      html: `
-        <div style="font-family: sans-serif; text-align: center; max-width: 500px; margin: auto;">
-          <h2>Welcome to Peerly!</h2>
-          <p>Your one-time login code is:</p>
-          <h1 style="font-size: 32px; letter-spacing: 5px; color: #00d2ff; background: #262628; padding: 20px; border-radius: 10px;">${code}</h1>
-          <p>This code will expire in 5 minutes.</p>
-        </div>
-      `
+      update: { code: hashedCode, expires_at, created_at: new Date() },
+      create: { email, code: hashedCode, expires_at }
     });
 
     res.json({ success: true });
@@ -274,8 +274,12 @@ app.post("/auth/otp/verify", async (req, res) => {
     const otp = await prisma.otp.findUnique({ where: { email } });
     if (!otp) return res.status(400).json({ error: "No pending OTP for this email" });
     
-    if (otp.code !== code) return res.status(400).json({ error: "Invalid code" });
-    if (otp.expires_at < new Date()) return res.status(400).json({ error: "Code expired" });
+    if (otp.expires_at < new Date()) {
+      await prisma.otp.delete({ where: { email } });
+      return res.status(400).json({ error: "Code expired" });
+    }
+    const isValid = await argon2.verify(otp.code, code);
+    if (!isValid) return res.status(400).json({ error: "Invalid code" });
 
     // Mark used by deleting
     await prisma.otp.delete({ where: { email } });

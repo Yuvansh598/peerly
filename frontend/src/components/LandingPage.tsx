@@ -26,6 +26,15 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
 
   const [loginIdentifier, setLoginIdentifier] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [countdown, setCountdown] = useState(0);
+
+  React.useEffect(() => {
+    let timer: any;
+    if (countdown > 0) {
+      timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [countdown]);
 
   const handleGuestStart = async (type: 'random_text' | 'random_video' | 'random_voice' = 'random_text') => {
     const tags = tagsInput.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
@@ -87,6 +96,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
       const data = await res.json();
       if (data.success) {
         setOtpSent(true);
+        setCountdown(60);
         toast.success("Code sent to your email!");
       } else {
         toast.error(data.error || "Failed to send code");
@@ -317,10 +327,10 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
                         />
                         <button 
                           type="submit" 
-                          disabled={isLoadingOtp}
+                          disabled={isLoadingOtp || countdown > 0}
                           className="bg-[var(--color-accent)] text-[var(--color-bg)] font-bold py-3 rounded-lg hover:bg-[#33dfff] transition-colors disabled:opacity-50"
                         >
-                          {isLoadingOtp ? 'Sending...' : 'Send Login Code'}
+                          {isLoadingOtp ? 'Sending...' : countdown > 0 ? `Resend in ${countdown}s` : 'Send Login Code'}
                         </button>
                         <button type="button" onClick={() => setUseOtpLogin(false)} className="text-[var(--color-text-secondary)] text-sm mt-2 hover:text-white">
                           Use password instead
@@ -368,8 +378,12 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
                     <input required type="email" placeholder="Email Address" value={regEmail} onChange={e => setRegEmail(e.target.value)} className="bg-[var(--color-bg)] border border-[var(--color-border)] px-4 py-3 rounded-lg outline-none focus:border-[var(--color-accent)] w-full" />
                     <input required type="password" placeholder="Password" value={regPassword} onChange={e => setRegPassword(e.target.value)} className="bg-[var(--color-bg)] border border-[var(--color-border)] px-4 py-3 rounded-lg outline-none focus:border-[var(--color-accent)] w-full" />
                     
-                    <button type="submit" disabled={isLoadingOtp} className="bg-[var(--color-accent)] text-[var(--color-bg)] font-bold py-3 rounded-lg mt-2 hover:bg-[#33dfff] transition-colors disabled:opacity-50">
-                      {isLoadingOtp ? 'Sending Code...' : 'Sign Up'}
+                    <button 
+                      type="submit" 
+                      disabled={isLoadingOtp || countdown > 0} 
+                      className="bg-[var(--color-accent)] text-[var(--color-bg)] font-bold py-3 rounded-lg mt-2 hover:bg-[#33dfff] transition-colors disabled:opacity-50"
+                    >
+                      {isLoadingOtp ? 'Sending Code...' : countdown > 0 ? `Resend in ${countdown}s` : 'Sign Up'}
                     </button>
                   </form>
                 ) : (
@@ -417,7 +431,6 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
                 }}
                 theme="filled_black"
                 shape="rectangular"
-                width="100%"
                 text={authMode === 'login' ? 'continue_with' : 'signup_with'}
               />
             </div>
