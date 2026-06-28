@@ -1,37 +1,36 @@
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
 generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
-model User {
-  id                String   @id @default(uuid())
-  auth_provider     String   // "email" or "google"
-  email             String   @unique
-  password_hash     String?
-  google_id         String?  @unique
-  username          String   @unique
-  display_name      String?
-  avatar_url        String?
-  bio               String?
-  date_of_birth     DateTime
-  is_video_eligible Boolean  @default(false)
-  status            String   @default("active") // "active", "suspended", "banned", "deleted"
-  email_verified_at DateTime?
-  created_at        DateTime @default(now())
-  updated_at        DateTime @updatedAt
-  last_login_at     DateTime?
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
 
-  friend_requests_sent     FriendRequest[] @relation("SentRequests")
+model User {
+  id                       String          @id @default(uuid())
+  auth_provider            String
+  email                    String          @unique
+  password_hash            String?
+  google_id                String?         @unique
+  username                 String          @unique
+  display_name             String?
+  avatar_url               String?
+  bio                      String?
+  date_of_birth            DateTime
+  is_video_eligible        Boolean         @default(false)
+  status                   String          @default("active")
+  email_verified_at        DateTime?
+  created_at               DateTime        @default(now())
+  updated_at               DateTime        @updatedAt
+  last_login_at            DateTime?
+  blocks_received          Block[]         @relation("Blocked")
+  blocks_initiated         Block[]         @relation("Blocker")
   friend_requests_received FriendRequest[] @relation("ReceivedRequests")
+  friend_requests_sent     FriendRequest[] @relation("SentRequests")
   friendships_a            Friendship[]    @relation("FriendshipUserA")
   friendships_b            Friendship[]    @relation("FriendshipUserB")
-  blocks_initiated         Block[]         @relation("Blocker")
-  blocks_received          Block[]         @relation("Blocked")
 }
 
 model GuestSession {
@@ -44,15 +43,14 @@ model GuestSession {
 }
 
 model FriendRequest {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   sender_id    String
   receiver_id  String
-  status       String   // "pending", "accepted", "declined", "cancelled"
-  created_at   DateTime @default(now())
+  status       String
+  created_at   DateTime  @default(now())
   responded_at DateTime?
-
-  sender   User @relation("SentRequests", fields: [sender_id], references: [id])
-  receiver User @relation("ReceivedRequests", fields: [receiver_id], references: [id])
+  receiver     User      @relation("ReceivedRequests", fields: [receiver_id], references: [id])
+  sender       User      @relation("SentRequests", fields: [sender_id], references: [id])
 
   @@unique([sender_id, receiver_id])
 }
@@ -62,9 +60,8 @@ model Friendship {
   user_a_id  String
   user_b_id  String
   created_at DateTime @default(now())
-
-  user_a User @relation("FriendshipUserA", fields: [user_a_id], references: [id])
-  user_b User @relation("FriendshipUserB", fields: [user_b_id], references: [id])
+  user_a     User     @relation("FriendshipUserA", fields: [user_a_id], references: [id])
+  user_b     User     @relation("FriendshipUserB", fields: [user_b_id], references: [id])
 
   @@unique([user_a_id, user_b_id])
 }
@@ -75,25 +72,23 @@ model Block {
   blocked_id String
   reason     String?
   created_at DateTime @default(now())
-
-  blocker User @relation("Blocker", fields: [blocker_id], references: [id])
-  blocked User @relation("Blocked", fields: [blocked_id], references: [id])
+  blocked    User     @relation("Blocked", fields: [blocked_id], references: [id])
+  blocker    User     @relation("Blocker", fields: [blocker_id], references: [id])
 
   @@unique([blocker_id, blocked_id])
 }
 
 model ChatSession {
   id                 String    @id @default(uuid())
-  type               String    // "random_text", "random_voice", "random_video", "friend_chat"
-  participant_1_type String    // "user", "guest"
+  type               String
+  participant_1_type String
   participant_1_id   String
-  participant_2_type String    // "user", "guest"
+  participant_2_type String
   participant_2_id   String
   started_at         DateTime  @default(now())
   ended_at           DateTime?
-  end_reason         String?   // "user_left", "disconnected", "reported", "timeout"
-
-  messages Message[]
+  end_reason         String?
+  messages           Message[]
 
   @@index([participant_1_id])
   @@index([participant_2_id])
@@ -103,14 +98,13 @@ model ChatSession {
 model Message {
   id              String      @id @default(uuid())
   chat_session_id String
-  sender_type     String      // "user", "guest"
+  sender_type     String
   sender_id       String
   content         String?
-  message_type    String      // "text", "emoji", "system"
+  message_type    String
   created_at      DateTime    @default(now())
   is_deleted      Boolean     @default(false)
-
-  chat_session ChatSession @relation(fields: [chat_session_id], references: [id])
+  chat_session    ChatSession @relation(fields: [chat_session_id], references: [id])
 }
 
 model Otp {
