@@ -54,7 +54,7 @@ export const CompleteProfileModal: React.FC<CompleteProfileModalProps> = ({ goog
         formData.append('picture', googleData.picture);
       }
 
-      const res = await fetch(`${API_URL}/auth/google/register', {
+      const res = await fetch(`${API_URL}/auth/google/register`, {
         method: 'POST',
         body: formData,
       });

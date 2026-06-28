@@ -35,7 +35,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
   const fetchProfile = async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/users/me', {
+      const res = await fetch(`${API_URL}/users/me`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -67,7 +67,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
 
     try {
       const loadingToast = toast.loading('Saving profile...');
-      const res = await fetch(`${API_URL}/users/me', {
+      const res = await fetch(`${API_URL}/users/me`, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData
@@ -90,7 +90,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
   const respondToRequest = async (requestId: string, action: 'accepted' | 'declined') => {
     if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/friends/respond', {
+      const res = await fetch(`${API_URL}/friends/respond`, {
         method: 'POST',
         headers: { 
           'Authorization': `Bearer ${token}`,
@@ -112,7 +112,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
 
   const handleDeleteProfile = async () => {
     try {
-      const res = await fetch(`${API_URL}/users/me', {
+      const res = await fetch(`${API_URL}/users/me`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });

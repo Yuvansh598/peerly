@@ -34,7 +34,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
       return;
     }
     try {
-      const res = await fetch(`${API_URL}/auth/guest', { method: 'POST' });
+      const res = await fetch(`${API_URL}/auth/guest`, { method: 'POST' });
       const data = await res.json();
       if (data.success) {
         login(data.token, data.user);
@@ -50,7 +50,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
 
   const handleGoogleSuccess = async (credentialResponse: any) => {
     try {
-      const res = await fetch(`${API_URL}/auth/google/verify', {
+      const res = await fetch(`${API_URL}/auth/google/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ credential: credentialResponse.credential })
@@ -79,7 +79,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
     if (!emailToUse) return;
     setIsLoadingOtp(true);
     try {
-      const res = await fetch(`${API_URL}/auth/otp/send', {
+      const res = await fetch(`${API_URL}/auth/otp/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: emailToUse })
@@ -103,7 +103,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
     if (!otpInput) return;
     setIsLoadingOtp(true);
     try {
-      const res = await fetch(`${API_URL}/auth/otp/verify', {
+      const res = await fetch(`${API_URL}/auth/otp/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: emailInput, code: otpInput })
@@ -132,7 +132,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
     if (!otpInput) return;
     setIsLoadingOtp(true);
     try {
-      const res = await fetch(`${API_URL}/auth/register', {
+      const res = await fetch(`${API_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -160,7 +160,7 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_URL}/auth/login', {
+      const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identifier: loginIdentifier, password: loginPassword })

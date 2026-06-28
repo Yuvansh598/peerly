@@ -130,7 +130,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
     if (!token || !partnerId || guest.type !== 'user') return;
     const loadingToast = toast.loading('Sending request...');
     try {
-      const res = await fetch(`${API_URL}/friends/request', {
+      const res = await fetch(`${API_URL}/friends/request`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
