@@ -95,27 +95,45 @@ const requireAuth = (req: any, res: any, next: any) => {
 };
 
 // --- RATE LIMITERS ---
-const limiterOptions = {
-  store: new RedisStore({
+const createRedisStore = (prefix: string) => {
+  return new RedisStore({
     // @ts-expect-error - Known issue with rate-limit-redis type definitions
     sendCommand: (...args: string[]) => redisClient.call(...args),
-  }),
-  standardHeaders: true,
-  legacyHeaders: false,
+    prefix: prefix,
+  });
 };
 
-// Max 50 per hour for guests/auth endpoints
-const authLimiter = rateLimit({
-  ...limiterOptions,
+const globalAuthLimiter = rateLimit({
+  store: createRedisStore("rl:global:"),
+  standardHeaders: true,
+  legacyHeaders: false,
   windowMs: 60 * 60 * 1000,
   max: 50,
   message: "Too many authentication requests, please try again later."
 });
 
-app.use("/auth", authLimiter);
+const loginLimiter = rateLimit({
+  store: createRedisStore("rl:login:"),
+  standardHeaders: true,
+  legacyHeaders: false,
+  windowMs: 60 * 60 * 1000,
+  max: 50,
+  message: "Too many login requests, please try again later."
+});
+
+const registerLimiter = rateLimit({
+  store: createRedisStore("rl:register:"),
+  standardHeaders: true,
+  legacyHeaders: false,
+  windowMs: 60 * 60 * 1000,
+  max: 50,
+  message: "Too many registration requests, please try again later."
+});
 
 const otpLimiter = rateLimit({
-  ...limiterOptions,
+  store: createRedisStore("rl:otp:"),
+  standardHeaders: true,
+  legacyHeaders: false,
   windowMs: 60 * 1000,
   max: 3,
   message: "Too many OTP requests, please try again later."
@@ -139,7 +157,7 @@ app.get("/health", async (req, res) => {
   });
 });
 
-app.post("/auth/guest", async (req, res) => {
+app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
   try {
     const adjectives = ["Swift", "Calm", "Brave", "Quiet", "Fast", "Night"];
     const nouns = ["Panda", "Otter", "Eagle", "Falcon", "Turtle", "Fox"];
@@ -168,7 +186,7 @@ const registerSchema = z.object({
   otp: z.string().length(6)
 });
 
-app.post("/auth/register", async (req, res) => {
+app.post("/auth/register", registerLimiter, async (req, res) => {
   try {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues.map(i => i.message).join(", ") });
@@ -211,7 +229,7 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", loginLimiter, async (req, res) => {
   try {
     const { identifier, password } = req.body;
     const user = await prisma.user.findFirst({ 
@@ -266,7 +284,7 @@ app.post("/auth/otp/send", otpLimiter, async (req, res) => {
   }
 });
 
-app.post("/auth/otp/verify", async (req, res) => {
+app.post("/auth/otp/verify", globalAuthLimiter, async (req, res) => {
   try {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json({ error: "Email and code are required" });
@@ -302,7 +320,7 @@ app.post("/auth/otp/verify", async (req, res) => {
   }
 });
 
-app.post("/auth/google/verify", async (req, res) => {
+app.post("/auth/google/verify", globalAuthLimiter, async (req, res) => {
   try {
     const { credential } = req.body;
     if (!credential) return res.status(400).json({ error: "Missing credential" });
@@ -341,7 +359,7 @@ app.post("/auth/google/verify", async (req, res) => {
   }
 });
 
-app.post("/auth/google/register", upload.single('avatar'), async (req, res) => {
+app.post("/auth/google/register", globalAuthLimiter, upload.single('avatar'), async (req, res) => {
   try {
     const { email, google_id, username, date_of_birth, name } = req.body;
     
