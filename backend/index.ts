@@ -27,7 +27,7 @@ const httpServer = createServer(app);
 const prisma = new PrismaClient();
 
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
-const pubClient = new Redis(redisUrl, { maxRetriesPerRequest: null, enableOfflineQueue: false });
+const pubClient = new Redis(redisUrl);
 pubClient.on("error", (err) => console.error("Redis pubClient error:", err));
 const subClient = pubClient.duplicate();
 subClient.on("error", (err) => console.error("Redis subClient error:", err));
