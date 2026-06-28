@@ -68,7 +68,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
     try {
       const loadingToast = toast.loading('Saving profile...');
       const res = await fetch(`${API_URL}/users/me`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData
       });
