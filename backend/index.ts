@@ -22,6 +22,7 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1);
 const httpServer = createServer(app);
 const prisma = new PrismaClient();
 
