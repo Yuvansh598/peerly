@@ -153,7 +153,7 @@ app.get("/health", async (req, res) => {
   res.json({
     status: "ok",
     database: dbStatus,
-    email: "ready" // Assuming nodemailer verified successfully at startup
+    email: "brevo"
   });
 });
 
@@ -262,13 +262,13 @@ app.post("/auth/otp/send", otpLimiter, async (req, res) => {
 
     // Generate a secure 6 digit code
     const code = crypto.randomInt(100000, 999999).toString();
-    const expires_at = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const expires_at = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Hash the code before storing
     const hashedCode = await argon2.hash(code);
 
     // Send email first to prevent partial state if email fails
-    await EmailService.sendOTP(email, code);
+    await EmailService.sendOTPEmail(email, code);
 
     // Store in DB, update if exists
     await prisma.otp.upsert({
