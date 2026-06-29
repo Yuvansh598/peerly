@@ -217,7 +217,8 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
       <div className="max-w-6xl w-full grid grid-cols-1 md:grid-cols-12 gap-6 relative z-10 mt-16">
         
         {/* HERO CELL */}
-        <div className="col-span-1 md:col-span-8 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-8 md:p-12 flex flex-col justify-center">
+        <div className="col-span-1 md:col-span-8 bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl rounded-3xl p-8 md:p-12 flex flex-col justify-center relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-[var(--color-accent)] opacity-10 rounded-full blur-3xl pointer-events-none transform translate-x-1/3 -translate-y-1/3"></div>
           <h1 className="text-4xl md:text-[56px] font-bold leading-tight mb-4 tracking-tight">
             Talk to the world.<br/>
             <span className="text-[var(--color-accent)]">No strings.</span>
@@ -227,14 +228,14 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
           </p>
           
           <div className="flex gap-4 mb-8 flex-wrap">
-            <button className="flex items-center gap-2 bg-[var(--color-surface-raised)] px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm">
-              <MessageCircle size={18} className="text-[var(--color-accent)]" /> Text
+            <button className="flex items-center gap-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm px-5 py-2.5 rounded-xl border border-white/10 text-sm font-medium transition-all hover:scale-105 active:scale-95">
+              <MessageCircle size={18} className="text-[var(--color-accent)] drop-shadow-sm" /> Text
             </button>
-            <button className="flex items-center gap-2 bg-[var(--color-surface-raised)] px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm">
-              <Mic size={18} className="text-[var(--color-accent)]" /> Voice
+            <button className="flex items-center gap-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm px-5 py-2.5 rounded-xl border border-white/10 text-sm font-medium transition-all hover:scale-105 active:scale-95">
+              <Mic size={18} className="text-[var(--color-accent)] drop-shadow-sm" /> Voice
             </button>
-            <button className="flex items-center gap-2 bg-[var(--color-surface-raised)] px-4 py-2 rounded-lg border border-[var(--color-border)] text-sm">
-              <Video size={18} className="text-[var(--color-accent)]" /> Video
+            <button className="flex items-center gap-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm px-5 py-2.5 rounded-xl border border-white/10 text-sm font-medium transition-all hover:scale-105 active:scale-95">
+              <Video size={18} className="text-[var(--color-accent)] drop-shadow-sm" /> Video
             </button>
           </div>
 
@@ -246,22 +247,22 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
               onChange={e => setTagsInput(e.target.value)}
               className="bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] rounded-lg px-4 py-3 outline-none text-sm w-full md:min-w-[280px]"
             />
-            <div className="flex gap-2">
+            <div className="flex flex-col md:flex-row gap-3">
               <button 
                 onClick={() => handleGuestStart('random_text')}
-                className="bg-[var(--color-accent)] text-[var(--color-bg)] font-semibold px-6 py-4 rounded-lg hover:bg-[#33dfff] transition-colors w-full md:w-auto text-lg flex-1"
+                className="bg-[var(--color-accent)] text-[#0F1015] font-bold px-6 py-4 rounded-xl hover:bg-[#33dfff] transition-all hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(0,255,255,0.3)] w-full text-lg flex-1"
               >
                 Text Chat
               </button>
               <button 
                 onClick={() => handleGuestStart('random_voice')}
-                className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-semibold px-6 py-4 rounded-lg hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-colors w-full md:w-auto text-lg flex-1"
+                className="bg-white/5 backdrop-blur-md border border-white/10 text-white font-bold px-6 py-4 rounded-xl hover:bg-white/10 hover:border-white/20 transition-all hover:scale-[1.02] active:scale-[0.98] w-full text-lg flex-1"
               >
                 Voice Chat
               </button>
               <button 
                 onClick={() => handleGuestStart('random_video')}
-                className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-semibold px-6 py-4 rounded-lg hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-colors w-full md:w-auto text-lg flex-1"
+                className="bg-white/5 backdrop-blur-md border border-white/10 text-white font-bold px-6 py-4 rounded-xl hover:bg-white/10 hover:border-white/20 transition-all hover:scale-[1.02] active:scale-[0.98] w-full text-lg flex-1"
               >
                 Video Chat
               </button>
@@ -270,23 +271,24 @@ export const LandingPage = ({ onStart }: { onStart: (type?: 'random_text' | 'ran
         </div>
 
         <div className="col-span-1 md:col-span-4 flex flex-col gap-6">
-          <div className="flex gap-6">
-            <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-6 flex-1">
-              <Users size={24} className="text-[var(--color-accent)] mb-2" />
-              <div className="text-2xl font-bold">12,400</div>
-              <div className="text-[var(--color-text-secondary)] text-sm">online right now</div>
+          <div className="flex flex-col md:flex-row gap-6">
+            <div className="bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl rounded-3xl p-6 flex-1 hover:bg-white/10 transition-colors group">
+              <Users size={24} className="text-[var(--color-accent)] mb-3 group-hover:scale-110 transition-transform" />
+              <div className="text-3xl font-bold mb-1">12,400</div>
+              <div className="text-[var(--color-text-secondary)] text-sm font-medium">online right now</div>
             </div>
-            <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-6 flex-1">
-              <Clock size={24} className="text-[var(--color-accent)] mb-2" />
-              <div className="text-2xl font-bold">9 min</div>
-              <div className="text-[var(--color-text-secondary)] text-sm">avg session</div>
+            <div className="bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl rounded-3xl p-6 flex-1 hover:bg-white/10 transition-colors group">
+              <Clock size={24} className="text-[var(--color-accent)] mb-3 group-hover:scale-110 transition-transform" />
+              <div className="text-3xl font-bold mb-1">9 min</div>
+              <div className="text-[var(--color-text-secondary)] text-sm font-medium">avg session</div>
             </div>
           </div>
 
-          <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-6 flex-1">
-            <Shield size={24} className="text-[var(--color-success)] mb-4" />
-            <h3 className="text-xl font-semibold mb-2">Private by Design</h3>
-            <p className="text-[var(--color-text-secondary)] text-sm">
+          <div className="bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl rounded-3xl p-8 flex-1 relative overflow-hidden group hover:bg-white/10 transition-colors">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-[var(--color-success)] opacity-10 rounded-full blur-3xl pointer-events-none transform translate-x-1/2 -translate-y-1/2"></div>
+            <Shield size={28} className="text-[var(--color-success)] mb-5 group-hover:scale-110 transition-transform" />
+            <h3 className="text-xl font-bold mb-3 tracking-tight">Private by Design</h3>
+            <p className="text-[var(--color-text-secondary)] text-sm leading-relaxed">
               No signup. No tracking. End-to-end anonymity. Your conversations vanish when you leave.
             </p>
           </div>

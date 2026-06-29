@@ -1,22 +1,25 @@
-import { API_URL } from '../config';
 import React, { useState, useEffect, useRef } from 'react';
 import { socket } from '../socket';
-import { Shield, UserPlus, X, Send } from 'lucide-react';
-import { useAuthStore } from '../store';
+import { Shield, X, Send, SkipForward, Copy, Smile } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
+import { SearchingScreen } from './SearchingScreen';
+import { CallDuration, formatDuration } from './CallDuration';
+
+const EMOJIS = ['😀', '😂', '😍', '🙏', '👍', '🔥', '✨', '💯'];
 
 export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () => void; tags?: string[] }) => {
-  const { token } = useAuthStore();
   const [status, setStatus] = useState<'idle' | 'waiting' | 'matched' | 'ended'>('idle');
   const [roomId, setRoomId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [partnerId, setPartnerId] = useState<string | null>(null);
+  const [, setPartnerId] = useState<string | null>(null);
   const [partnerUsername, setPartnerUsername] = useState<string | null>(null);
-  const [messages, setMessages] = useState<{senderId: string, content: string, time: string}[]>([]);
+  const [messages, setMessages] = useState<{id: string, senderId: string, content: string, time: string}[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [partnerTyping, setPartnerTyping] = useState(false);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [showEmojis, setShowEmojis] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<any>(null);
@@ -25,7 +28,6 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
   useEffect(() => {
     socket.connect();
     
-    // Join matchmaking queue
     if (!hasJoinedRef.current) {
       hasJoinedRef.current = true;
       setStatus('waiting');
@@ -44,11 +46,13 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
       setPartnerId(data.partnerId);
       setPartnerUsername(data.partnerUsername || null);
       setMessages([]);
+      setStartTime(Date.now());
       socket.emit('session:joined', data);
     });
 
     socket.on('message:receive', (msg) => {
       setMessages(prev => [...prev, {
+        id: msg.id || Math.random().toString(),
         senderId: msg.sender_id,
         content: msg.content,
         time: new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
@@ -56,13 +60,8 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
       setPartnerTyping(false);
     });
 
-    socket.on('typing:start', () => {
-      setPartnerTyping(true);
-    });
-
-    socket.on('typing:stop', () => {
-      setPartnerTyping(false);
-    });
+    socket.on('typing:start', () => setPartnerTyping(true));
+    socket.on('typing:stop', () => setPartnerTyping(false));
 
     socket.on('session:ended', () => {
       setStatus('ended');
@@ -76,32 +75,33 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
       socket.off('typing:stop');
       socket.off('session:ended');
     };
-  }, []);
+  }, [guest.id, tags]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, partnerTyping]);
 
-  const handleSend = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSend = (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!input.trim() || status !== 'matched') return;
     
-    socket.emit('message:send', {
-      roomId,
-      message: input,
-      senderId: guest.id,
-      sessionId
-    });
-    
+    socket.emit('message:send', { roomId, message: input, senderId: guest.id, sessionId });
     setInput('');
+    setShowEmojis(false);
     setIsTyping(false);
     socket.emit('typing:stop', { roomId, senderId: guest.id });
-    if(typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
   };
 
-  const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleTyping = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
-    
     if (status !== 'matched') return;
 
     if (!isTyping) {
@@ -109,173 +109,164 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
       socket.emit('typing:start', { roomId, senderId: guest.id });
     }
 
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
-
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
       setIsTyping(false);
       socket.emit('typing:stop', { roomId, senderId: guest.id });
     }, 1500);
   };
 
-  const handleEnd = () => {
-    if (roomId && sessionId) {
-      socket.emit('session:end', { roomId, sessionId });
-    }
+  const handleSkip = () => {
+    socket.emit('match:skip', { type: 'random_text', tags });
+    setStatus('waiting');
+    setMessages([]);
+    setStartTime(null);
+  };
+
+  const handleLeave = () => {
+    if (roomId && sessionId) socket.emit('match:leave');
     onLeave();
   };
 
-  const handleAddFriend = async () => {
-    if (!token || !partnerId || guest.type !== 'user') return;
-    const loadingToast = toast.loading('Sending request...');
-    try {
-      const res = await fetch(`${API_URL}/friends/request`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ targetUserId: partnerId })
-      });
-      const data = await res.json();
-      toast.dismiss(loadingToast);
-      if (data.success) {
-        toast.success("Friend request sent!");
-      } else {
-        toast.error(data.error || "Could not send friend request");
-      }
-    } catch (e) {
-      toast.dismiss(loadingToast);
-      toast.error("Error sending request");
-    }
+  const copyText = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast.success("Message copied");
+  };
+
+  const renderMessageContent = (content: string) => {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    return content.split(urlRegex).map((part, i) => 
+      urlRegex.test(part) ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-blue-300 hover:underline break-all">{part}</a> : <span key={i} className="break-words">{part}</span>
+    );
   };
 
   if (status === 'waiting') {
-    return (
-      <div className="min-h-screen bg-[var(--color-bg)] flex flex-col items-center justify-center relative overflow-hidden">
-        <div className="absolute inset-0 bg-[var(--color-accent)] opacity-5 blur-[100px] rounded-full pointer-events-none w-96 h-96 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
-        <div className="relative z-10 flex flex-col items-center">
-          <div className="relative flex items-center justify-center mb-8">
-            <div className="absolute w-24 h-24 border-4 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin opacity-50" />
-            <div className="absolute w-16 h-16 border-4 border-[var(--color-accent)] border-b-transparent rounded-full animate-spin animation-delay-150 opacity-70" />
-            <div className="w-8 h-8 bg-[var(--color-accent)] rounded-full animate-pulse shadow-[0_0_20px_var(--color-accent)]" />
-          </div>
-          <h2 className="text-2xl font-bold tracking-tight mb-2">Looking for a match...</h2>
-          <p className="text-[var(--color-text-secondary)] mb-8">Get ready to meet someone new.</p>
-          <button onClick={onLeave} className="px-8 py-3 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:bg-[var(--color-surface)] hover:scale-105 transition-all text-sm font-semibold">
-            Cancel Search
-          </button>
-        </div>
-      </div>
-    );
+    return <SearchingScreen onCancel={handleLeave} />;
   }
 
   return (
-    <div className="min-h-screen bg-[var(--color-bg)] flex flex-col max-w-4xl mx-auto border-x border-[var(--color-border)] shadow-2xl">
-      {/* HEADER */}
-      <div className="h-16 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-between px-6">
+    <div className="flex flex-col h-screen w-full bg-[#0F1015] text-[var(--color-text-primary)] relative animate-in fade-in zoom-in-95 duration-300">
+      {/* Top Bar */}
+      <div className="h-16 flex items-center justify-between px-4 lg:px-6 bg-white/5 backdrop-blur-xl border-b border-white/10 shrink-0 z-20">
         <div className="flex items-center gap-4">
-          <button onClick={handleEnd} className="text-[var(--color-text-secondary)] hover:text-white flex items-center gap-2">
-            <X size={20} /> Back
+          <button onClick={handleLeave} className="p-2 hover:bg-white/10 rounded-full transition-colors">
+            <X size={20} />
           </button>
-          <div className="font-mono text-[var(--color-text-primary)] font-bold">
-            {partnerUsername ? `@${partnerUsername}` : 'Stranger'}
+          <div className="flex flex-col">
+            <span className="font-bold text-lg leading-tight">
+              {partnerUsername ? `@${partnerUsername}` : 'Stranger'}
+            </span>
+            {startTime && <div className="text-cyan-400"><CallDuration startTime={startTime} /></div>}
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button className="text-[var(--color-danger)] p-2 hover:bg-[var(--color-surface-raised)] rounded-lg transition-colors" title="Report">
-            <Shield size={20} />
+
+        <div className="flex items-center gap-2">
+          <button onClick={handleSkip} className="hidden md:flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-xl text-sm font-medium transition-all active:scale-95 border border-white/5">
+            <SkipForward size={16}/> Skip
           </button>
-          {guest.type === 'user' && (
-            <button onClick={handleAddFriend} className="text-[var(--color-accent)] p-2 hover:bg-[var(--color-surface-raised)] rounded-lg transition-colors" title="Add Friend">
-              <UserPlus size={20} />
-            </button>
-          )}
-          <button onClick={handleEnd} className="bg-[var(--color-danger)] text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-opacity-80 transition-colors">
-            End
+          <button className="p-2 text-red-400 hover:bg-red-400/10 rounded-full transition-colors" title="Report">
+            <Shield size={20} />
           </button>
         </div>
       </div>
 
-      {/* MESSAGES */}
-      <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
-        <div className="text-center text-[var(--color-text-secondary)] text-sm my-4 border-b border-[var(--color-border)] pb-4">
-          You are now chatting with {partnerUsername ? `@${partnerUsername}` : 'a random stranger'}.<br/>Say hi!
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 lg:p-6 flex flex-col gap-6 relative">
+        <div className="text-center text-[var(--color-text-secondary)] text-sm my-6">
+          <div className="inline-block bg-white/5 border border-white/10 rounded-full px-4 py-1.5 backdrop-blur-sm">
+            Chat started. Say hi!
+          </div>
         </div>
         
         {messages.map((m, i) => {
           const isMe = m.senderId === guest.id;
           return (
-            <div key={i} className={clsx("flex flex-col max-w-[70%]", isMe ? "self-end items-end" : "self-start items-start")}>
-              <div className={clsx(
-                "px-4 py-2",
-                isMe ? "bg-[var(--color-accent-muted)] text-[var(--color-text-primary)]" : "bg-[var(--color-surface-raised)] text-[var(--color-text-primary)]",
-                isMe ? "rounded-[16px_16px_4px_16px]" : "rounded-[16px_16px_16px_4px]"
-              )}>
-                {m.content}
+            <div key={m.id || i} className={clsx("flex flex-col max-w-[85%] md:max-w-[70%] group animate-in slide-in-from-bottom-2 fade-in duration-300", isMe ? "self-end items-end" : "self-start items-start")}>
+              <div className="flex items-center gap-2">
+                {isMe && <button onClick={() => copyText(m.content)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-white/10 rounded text-[var(--color-text-secondary)] transition-all"><Copy size={14}/></button>}
+                <div className={clsx(
+                  "px-5 py-3 text-[15px] leading-relaxed shadow-md",
+                  isMe ? "bg-cyan-600/90 text-white rounded-[20px_20px_4px_20px]" : "bg-white/10 text-white border border-white/5 rounded-[20px_20px_20px_4px]"
+                )}>
+                  {renderMessageContent(m.content)}
+                </div>
+                {!isMe && <button onClick={() => copyText(m.content)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-white/10 rounded text-[var(--color-text-secondary)] transition-all"><Copy size={14}/></button>}
               </div>
-              <div className="text-xs text-[var(--color-text-secondary)] mt-1 px-1">
-                {m.time} {isMe && <span className="text-[var(--color-accent)] ml-1">✓✓</span>}
+              <div className="text-[11px] text-[var(--color-text-secondary)] mt-1.5 px-2 font-medium tracking-wide">
+                {m.time} {isMe && <span className="text-cyan-400 ml-1">✓</span>}
               </div>
             </div>
           );
         })}
+
         {partnerTyping && (
-          <div className="self-start items-start flex flex-col max-w-[70%]">
-             <div className="text-sm text-[var(--color-text-secondary)] mt-1 px-1 flex items-center gap-1">
-                <div className="flex gap-1">
-                  <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce [animation-delay:-0.3s]" />
-                  <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce [animation-delay:-0.15s]" />
-                  <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce" />
-                </div>
-                {partnerUsername ? `@${partnerUsername}` : 'Stranger'} is typing...
+          <div className="self-start flex flex-col max-w-[70%] animate-in fade-in duration-300">
+             <div className="bg-white/5 border border-white/10 rounded-full px-4 py-2 flex items-center gap-1.5 w-fit">
+                <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce [animation-delay:-0.3s]" />
+                <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce [animation-delay:-0.15s]" />
+                <div className="w-1.5 h-1.5 bg-[var(--color-text-secondary)] rounded-full animate-bounce" />
              </div>
           </div>
         )}
+        
         {status === 'ended' && (
-          <div className="text-center my-4 bg-[var(--color-surface-raised)] border border-[var(--color-border)] rounded-lg p-4 mx-auto max-w-sm">
-            <div className="text-[var(--color-text-primary)] font-semibold mb-1">Stranger has disconnected</div>
-            <div className="text-[var(--color-text-secondary)] text-sm mb-4">The chat session has ended.</div>
-            <button 
-              onClick={() => {
-                setStatus('waiting');
-                setMessages([]);
-                socket.emit('match:join', { guestId: guest.id, tags }, (res: any) => {
-                  if (res.status === 'matched') {
-                    setStatus('matched');
-                    setRoomId(res.roomId);
-                  }
-                });
-              }}
-              className="bg-[var(--color-accent)] text-[var(--color-bg)] font-medium px-4 py-2 rounded-lg hover:bg-[#33dfff] transition-colors text-sm w-full"
-            >
-              Find New Match
-            </button>
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-in fade-in">
+            <div className="bg-[#1a1b1e] border border-white/10 shadow-2xl rounded-2xl p-8 max-w-sm w-full text-center flex flex-col items-center">
+              <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mb-4">
+                <X size={32} className="text-red-400" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Partner disconnected.</h3>
+              <p className="text-[var(--color-text-secondary)] mb-6 font-medium">
+                Conversation lasted: {startTime ? formatDuration(Date.now() - startTime) : '00:00'}
+              </p>
+              <div className="flex flex-col gap-3 w-full">
+                <button onClick={handleSkip} className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold py-3.5 rounded-xl transition-all active:scale-95 w-full">
+                  Find New Match
+                </button>
+                <button onClick={handleLeave} className="bg-white/5 hover:bg-white/10 text-white font-semibold py-3.5 rounded-xl transition-all active:scale-95 w-full">
+                  Home
+                </button>
+              </div>
+            </div>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* INPUT */}
-      <div className="p-4 bg-[var(--color-surface)] border-t border-[var(--color-border)]">
-        <form onSubmit={handleSend} className="flex gap-2">
-          <input 
-            type="text" 
-            value={input}
-            onChange={handleTyping}
-            placeholder={status === 'ended' ? "Chat ended..." : "Type a message..."}
-            disabled={status === 'ended'}
-            className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent-muted)] rounded-lg px-4 py-3 outline-none transition-all disabled:opacity-50"
-          />
+      {/* Input Area */}
+      <div className="p-4 bg-white/5 backdrop-blur-xl border-t border-white/10 shrink-0 relative">
+        {showEmojis && (
+          <div className="absolute bottom-full left-4 mb-2 bg-[#1a1b1e] border border-white/10 rounded-xl p-2 flex gap-2 shadow-2xl animate-in slide-in-from-bottom-2 fade-in">
+            {EMOJIS.map(e => (
+              <button key={e} onClick={() => { setInput(i => i + e); setShowEmojis(false); }} className="hover:bg-white/10 p-2 rounded-lg text-xl transition-colors">
+                {e}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex items-end gap-3 max-w-5xl mx-auto">
+          <div className="flex-1 bg-[#1a1b1e] border border-white/10 rounded-[24px] flex items-end p-1.5 focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all shadow-inner">
+            <button onClick={() => setShowEmojis(!showEmojis)} className="p-3 text-[var(--color-text-secondary)] hover:text-white rounded-full transition-colors shrink-0">
+              <Smile size={22} />
+            </button>
+            <textarea 
+              value={input}
+              onChange={handleTyping}
+              onKeyDown={handleKeyDown}
+              placeholder="Message..."
+              disabled={status === 'ended'}
+              className="flex-1 bg-transparent border-none outline-none text-[15px] resize-none max-h-32 min-h-[44px] py-3 px-2 leading-relaxed custom-scrollbar disabled:opacity-50"
+              rows={1}
+            />
+          </div>
           <button 
-            type="submit"
+            onClick={() => handleSend()}
             disabled={!input.trim() || status === 'ended'}
-            className="bg-[var(--color-accent)] text-[var(--color-bg)] p-3 rounded-lg disabled:opacity-50 hover:bg-[#33dfff] transition-colors flex items-center justify-center"
+            className="bg-cyan-500 text-black p-4 rounded-full disabled:opacity-50 hover:bg-cyan-400 hover:scale-105 active:scale-95 transition-all shadow-[0_0_15px_rgba(0,255,255,0.2)] shrink-0 flex items-center justify-center h-[56px] w-[56px]"
           >
-            <Send size={20} />
+            <Send size={20} className="ml-1" />
           </button>
-        </form>
+        </div>
       </div>
     </div>
   );

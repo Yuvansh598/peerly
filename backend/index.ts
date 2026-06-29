@@ -750,9 +750,65 @@ io.on("connection", (socket) => {
 
   socket.on("match:leave", async () => {
     await redisClient.set(`user:${user.id}:status`, 'offline');
-    // Removing from all possible global queues just to be safe
     await redisClient.lrem(`queue:random_text:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
     await redisClient.lrem(`queue:random_video:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
+    await redisClient.lrem(`queue:random_voice:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
+    
+    // @ts-ignore
+    if (socket.currentSession && socket.currentRoom) {
+      // @ts-ignore
+      const { currentSession, currentRoom } = socket;
+      try {
+        await prisma.chatSession.update({
+          where: { id: currentSession },
+          data: { ended_at: new Date(), end_reason: "user_left" }
+        });
+        io.to(currentRoom).emit("session:ended", { reason: "partner_left" });
+      } catch (e) {
+        console.error(e);
+      }
+      // @ts-ignore
+      socket.currentSession = null;
+      // @ts-ignore
+      socket.currentRoom = null;
+    }
+  });
+
+  socket.on("match:skip", async (data) => {
+    // End current session
+    // @ts-ignore
+    if (socket.currentSession && socket.currentRoom) {
+      // @ts-ignore
+      const { currentSession, currentRoom } = socket;
+      try {
+        await prisma.chatSession.update({
+          where: { id: currentSession },
+          data: { ended_at: new Date(), end_reason: "skipped" }
+        });
+        socket.to(currentRoom).emit("session:ended", { reason: "partner_skipped" });
+        socket.leave(currentRoom);
+      } catch (e) {
+        console.error(e);
+      }
+      // @ts-ignore
+      socket.currentSession = null;
+      // @ts-ignore
+      socket.currentRoom = null;
+    }
+    
+    // Join queue again
+    const { type = 'random_text', tags = [] } = data || {};
+    const userPayloadStr = JSON.stringify({ id: user.id, username: user.username });
+    await redisClient.set(`user:${user.id}:status`, 'waiting');
+    
+    if (tags.length > 0) {
+      for (const tag of tags) {
+        await redisClient.rpush(`queue:${type}:tag:${tag}`, userPayloadStr);
+      }
+    } else {
+      await redisClient.rpush(`queue:${type}:global`, userPayloadStr);
+    }
+    if (typeof data?.cb === 'function') data.cb({ success: true, status: "waiting" });
   });
 
   socket.on("message:send", async (data) => {
@@ -794,7 +850,7 @@ io.on("connection", (socket) => {
         where: { id: sessionId },
         data: { ended_at: new Date(), end_reason: "user_left" }
       });
-      io.to(roomId).emit("session:ended");
+      io.to(roomId).emit("session:ended", { reason: "partner_left" });
     } catch (e) {
       console.error(e);
     }
@@ -814,7 +870,7 @@ io.on("connection", (socket) => {
           where: { id: currentSession },
           data: { ended_at: new Date(), end_reason: "disconnected" }
         });
-        io.to(currentRoom).emit("session:ended");
+        io.to(currentRoom).emit("session:ended", { reason: "disconnected" });
       } catch (e) {
         console.error(e);
       }
