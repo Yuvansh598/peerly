@@ -4,18 +4,18 @@ import { X, Video, VideoOff, Mic, MicOff } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { ICE_SERVERS } from '../config';
-import { WebRTCDebugPanel, WebRTCStats } from './WebRTCDebugPanel';
+import { WebRTCDebugPanel, type WebRTCStats } from './WebRTCDebugPanel';
 
 export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: { guest: any; onLeave: () => void; tags?: string[], type?: 'random_video' | 'random_voice' }) => {
   const [status, setStatus] = useState<'idle' | 'waiting' | 'matched' | 'ended'>('idle');
   const [partnerUsername, setPartnerUsername] = useState<string | null>(null);
-  const [roomId, setRoomId] = useState<string | null>(null);
+  const [, setRoomId] = useState<string | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   const [isVideoEnabled, setIsVideoEnabled] = useState(type === 'random_video');
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);

@@ -1,4 +1,3 @@
-import React from 'react';
 import { ICE_SERVERS } from '../config';
 
 export type WebRTCStats = {
