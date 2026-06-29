@@ -1,33 +1,69 @@
 import { useState, useEffect, useRef } from 'react';
 import { socket } from '../socket';
 import { X, Video, VideoOff, Mic, MicOff } from 'lucide-react';
-
+import toast from 'react-hot-toast';
 import clsx from 'clsx';
+import { ICE_SERVERS } from '../config';
+import { WebRTCDebugPanel, WebRTCStats } from './WebRTCDebugPanel';
 
 export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: { guest: any; onLeave: () => void; tags?: string[], type?: 'random_video' | 'random_voice' }) => {
   const [status, setStatus] = useState<'idle' | 'waiting' | 'matched' | 'ended'>('idle');
   const [partnerUsername, setPartnerUsername] = useState<string | null>(null);
-  const [, setRoomId] = useState<string | null>(null);
+  const [roomId, setRoomId] = useState<string | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const [isVideoEnabled, setIsVideoEnabled] = useState(type === 'random_video');
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const hasJoinedRef = useRef(false);
-
-  // Track the room ID currently in use so socket listeners don't use stale state
   const currentRoomRef = useRef<string | null>(null);
 
+  const [stats, setStats] = useState<WebRTCStats>({
+    socketConnected: socket.connected,
+    roomId: null,
+    role: null,
+    signalingState: 'new',
+    iceState: 'new',
+    connectionState: 'new',
+    candidates: { total: 0, relay: 0, srflx: 0, host: 0 },
+    localMedia: false,
+    remoteMedia: false,
+  });
+
+  const updateStats = (update: Partial<WebRTCStats> | ((prev: WebRTCStats) => WebRTCStats)) => {
+    setStats((prev) => typeof update === 'function' ? update(prev) : { ...prev, ...update });
+  };
+
   useEffect(() => {
+    if (import.meta.env.PROD && window.location.protocol !== "https:") {
+      toast.error("WebRTC requires a secure context (HTTPS).");
+      onLeave();
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast.error("Media devices not supported in this browser.");
+      onLeave();
+      return;
+    }
+
     socket.connect();
+    updateStats({ socketConnected: socket.connected });
+
+    const handleSocketConnect = () => updateStats({ socketConnected: true });
+    const handleSocketDisconnect = () => updateStats({ socketConnected: false });
+    
+    socket.on('connect', handleSocketConnect);
+    socket.on('disconnect', handleSocketDisconnect);
     
     const isVideo = type === 'random_video';
     navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true })
       .then((stream) => {
         localStreamRef.current = stream;
+        updateStats({ localMedia: true });
         if (localVideoRef.current && isVideo) {
           localVideoRef.current.srcObject = stream;
         }
@@ -40,21 +76,25 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
               setStatus('matched');
               setRoomId(res.roomId);
               currentRoomRef.current = res.roomId;
+              updateStats({ roomId: res.roomId });
             }
           });
         }
       })
       .catch(err => {
         console.error("Failed to get local media", err);
-        alert(isVideo ? "Camera and Microphone access are required for Video Chat." : "Microphone access is required for Voice Chat.");
+        toast.error(isVideo ? "Camera and Microphone access are required." : "Microphone access is required.");
         onLeave();
       });
 
-    const initPeerConnection = (room: string) => {
+    const initPeerConnection = (room: string, isCaller: boolean) => {
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: ICE_SERVERS,
+        iceCandidatePoolSize: 10
       });
       peerConnectionRef.current = pc;
+      
+      updateStats({ role: isCaller ? 'Caller' : 'Callee' });
 
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => {
@@ -65,12 +105,41 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
       pc.ontrack = (event) => {
         if (remoteVideoRef.current && event.streams[0]) {
           remoteVideoRef.current.srcObject = event.streams[0];
+          updateStats({ remoteMedia: true });
         }
       };
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
+          const type = event.candidate.candidate.includes('relay') ? 'relay' 
+                      : event.candidate.candidate.includes('srflx') ? 'srflx' 
+                      : event.candidate.candidate.includes('host') ? 'host' : 'unknown';
+          
+          updateStats(prev => ({
+            ...prev,
+            candidates: {
+              ...prev.candidates,
+              total: prev.candidates.total + 1,
+              [type]: prev.candidates[type as keyof typeof prev.candidates] + 1
+            }
+          }));
           socket.emit('webrtc:ice-candidate', { roomId: room, candidate: event.candidate });
+        }
+      };
+
+      pc.onsignalingstatechange = () => updateStats({ signalingState: pc.signalingState });
+      pc.oniceconnectionstatechange = () => {
+        updateStats({ iceState: pc.iceConnectionState });
+        if (pc.iceConnectionState === 'failed') {
+          console.warn("ICE Connection failed, attempting restart...");
+          pc.restartIce();
+        }
+      };
+      
+      pc.onconnectionstatechange = () => {
+        updateStats({ connectionState: pc.connectionState });
+        if (pc.connectionState === 'connected') {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current);
         }
       };
 
@@ -82,12 +151,20 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
       setRoomId(data.roomId);
       currentRoomRef.current = data.roomId;
       setPartnerUsername(data.partnerUsername || null);
+      updateStats({ roomId: data.roomId });
       socket.emit('session:joined', data);
 
-      const pc = initPeerConnection(data.roomId);
+      const isCaller = guest.id > data.partnerId;
+      const pc = initPeerConnection(data.roomId, isCaller);
       
-      // Use string comparison on IDs to determine initiator deterministically
-      if (guest.id > data.partnerId) {
+      timeoutRef.current = setTimeout(() => {
+        if (pc.connectionState !== 'connected') {
+          toast.error("Connection timed out. Partner may have network issues.");
+          handleEnd();
+        }
+      }, 30000);
+      
+      if (isCaller) {
         try {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
@@ -101,7 +178,7 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     socket.on('webrtc:offer', async (data) => {
       const room = currentRoomRef.current;
       if (!room) return;
-      const pc = peerConnectionRef.current || initPeerConnection(room);
+      const pc = peerConnectionRef.current || initPeerConnection(room, false);
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -128,6 +205,7 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
 
     socket.on('session:ended', () => {
       setStatus('ended');
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
         peerConnectionRef.current = null;
@@ -135,11 +213,14 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     });
 
     return () => {
+      socket.off('connect', handleSocketConnect);
+      socket.off('disconnect', handleSocketDisconnect);
       socket.off('session:start');
       socket.off('session:ended');
       socket.off('webrtc:offer');
       socket.off('webrtc:answer');
       socket.off('webrtc:ice-candidate');
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
       }
@@ -176,6 +257,7 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
 
   return (
     <div className="h-screen bg-[var(--color-bg)] flex flex-col items-center justify-center p-4">
+      <WebRTCDebugPanel stats={stats} />
       {status === 'waiting' && (
         <div className="text-center">
           <div className="w-16 h-16 border-4 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin mx-auto mb-6"></div>

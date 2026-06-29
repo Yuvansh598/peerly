@@ -22,7 +22,7 @@ export const FriendChat = ({ friend, onLeave }: { friend: any; onLeave: () => vo
     socket.connect();
     
     // Fetch chat history
-    fetch(`http://localhost:3001/friends/${friend.id}/chat`, {
+    fetch(`${API_URL}/friends/${friend.id}/chat`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(res => res.json())

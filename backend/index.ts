@@ -21,6 +21,11 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 dotenv.config();
 
+if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
+  console.error("FATAL: FRONTEND_URL environment variable is required in production.");
+  process.exit(1);
+}
+
 const app = express();
 app.set("trust proxy", 1);
 const httpServer = createServer(app);
@@ -717,19 +722,25 @@ io.on("connection", (socket) => {
 
   // WebRTC Signaling
   socket.on("webrtc:offer", (data) => {
+    console.log(`[WebRTC] Offer sent from ${user.username} to room ${data.roomId}`);
     socket.to(data.roomId).emit("webrtc:offer", { offer: data.offer, senderId: user.id });
   });
 
   socket.on("webrtc:answer", (data) => {
+    console.log(`[WebRTC] Answer sent from ${user.username} to room ${data.roomId}`);
     socket.to(data.roomId).emit("webrtc:answer", { answer: data.answer, senderId: user.id });
   });
 
   socket.on("webrtc:ice-candidate", (data) => {
+    if (process.env.DEBUG_WEBRTC === "true") {
+      console.log(`[WebRTC] ICE candidate from ${user.username} to room ${data.roomId}`);
+    }
     socket.to(data.roomId).emit("webrtc:ice-candidate", { candidate: data.candidate, senderId: user.id });
   });
 
   socket.on("session:joined", (data) => {
     const { roomId, sessionId } = data;
+    console.log(`[Socket] ${user.username} joined session room ${roomId}`);
     socket.join(roomId);
     // @ts-ignore
     socket.currentRoom = roomId;
