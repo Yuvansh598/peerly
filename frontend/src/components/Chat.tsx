@@ -27,21 +27,30 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<any>(null);
-  const hasJoinedRef = useRef(false);
+  const statusRef = useRef(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     socket.connect();
     
-    if (!hasJoinedRef.current) {
-      hasJoinedRef.current = true;
-      setStatus('waiting');
-      socket.emit('match:join', { type: 'random_text', tags }, (res: any) => {
-        if (res.success && res.status === 'matched') {
-          setStatus('matched');
-          setRoomId(res.roomId);
-        }
-      });
+    const handleConnect = () => {
+      if (statusRef.current === 'idle' || statusRef.current === 'waiting') {
+        setStatus('waiting');
+        socket.emit('match:join', { type: 'random_text', tags }, (res: any) => {
+          if (res.success && res.status === 'matched') {
+            setStatus('matched');
+            setRoomId(res.roomId);
+          }
+        });
+      }
+    };
+
+    if (socket.connected) {
+      handleConnect();
     }
+    socket.on('connect', handleConnect);
 
     const handleSessionStart = (data: any) => {
       setStatus('matched');
@@ -80,6 +89,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
     socket.on('session:ended', handleSessionEnded);
 
     return () => {
+      socket.off('connect', handleConnect);
       socket.off('session:start', handleSessionStart);
       socket.off('message:receive', handleMessageReceive);
       socket.off('typing:start', handleTypingStart);

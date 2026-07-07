@@ -14,7 +14,11 @@ export const useMatchmaking = (
   const [partnerUsername, setPartnerUsername] = useState<string | null>(null);
   const [partnerId, setPartnerId] = useState<string | null>(null);
   const [endReason, setEndReason] = useState<string | null>(null);
-  const isJoinedRef = useRef(false);
+
+  const statusRef = useRef(matchStatus);
+  useEffect(() => {
+    statusRef.current = matchStatus;
+  }, [matchStatus]);
 
   const startSearch = useCallback(() => {
     setMatchStatus('waiting');
@@ -23,23 +27,31 @@ export const useMatchmaking = (
     setPartnerUsername(null);
     setPartnerId(null);
     setEndReason(null);
-    isJoinedRef.current = true;
 
-    socket.emit('match:join', { type: chatType, tags }, (res: any) => {
-      if (res.success) {
-        if (res.status === 'matched') {
-          setMatchStatus('matched');
-          setRoomId(res.roomId);
-        }
-      } else {
-        toast.error(res.error || "Failed to join queue");
-        setMatchStatus('idle');
+    const join = () => {
+      if (statusRef.current === 'waiting') {
+        socket.emit('match:join', { type: chatType, tags }, (res: any) => {
+          if (res.success) {
+            if (res.status === 'matched') {
+              setMatchStatus('matched');
+              setRoomId(res.roomId);
+            }
+          } else {
+            toast.error(res.error || "Failed to join queue");
+            setMatchStatus('idle');
+          }
+        });
       }
-    });
+    };
+
+    if (socket.connected) {
+      join();
+    } else {
+      socket.once('connect', join);
+    }
   }, [chatType, tags]);
 
   const cancelSearch = useCallback(() => {
-    isJoinedRef.current = false;
     socket.emit('match:leave');
     setMatchStatus('idle');
   }, []);
@@ -65,6 +77,24 @@ export const useMatchmaking = (
     socket.emit('match:leave');
     setMatchStatus('idle');
   }, []);
+
+  useEffect(() => {
+    const handleConnect = () => {
+      if (statusRef.current === 'waiting') {
+        socket.emit('match:join', { type: chatType, tags }, (res: any) => {
+          if (res.success && res.status === 'matched') {
+            setMatchStatus('matched');
+            setRoomId(res.roomId);
+          }
+        });
+      }
+    };
+
+    socket.on('connect', handleConnect);
+    return () => {
+      socket.off('connect', handleConnect);
+    };
+  }, [chatType, tags]);
 
   useEffect(() => {
     const handleSessionStart = (data: { roomId: string; partnerId: string; sessionId: string; partnerUsername: string }) => {
