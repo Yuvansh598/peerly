@@ -1,14 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { LandingPage } from './components/LandingPage';
-import { Chat } from './components/Chat';
-import { VideoChat } from './components/VideoChat';
 import { FriendChat } from './components/FriendChat';
 import { Dashboard } from './components/Dashboard';
 import { socket, connectSocket } from './socket';
 import { useAuthStore } from './store';
 import { Toaster } from 'react-hot-toast';
 import { GoogleOAuthProvider } from '@react-oauth/google';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
+import { Loader } from './components/ui/Loader';
 import './index.css';
+
+const Chat = lazy(() => import('./components/Chat').then(m => ({ default: m.Chat })));
+const VideoChat = lazy(() => import('./components/VideoChat').then(m => ({ default: m.VideoChat })));
 
 function App() {
   const { token, user } = useAuthStore();
@@ -39,9 +42,17 @@ function App() {
     // If user is actively in a chat
     if (inChat) {
       if (chatType === 'random_video' || chatType === 'random_voice') {
-        return <VideoChat guest={user} onLeave={handleLeaveChat} tags={chatTags} type={chatType} />;
+        return (
+          <Suspense fallback={<div className="h-screen w-full flex items-center justify-center bg-[#070913]"><Loader /></div>}>
+            <VideoChat guest={user} onLeave={handleLeaveChat} tags={chatTags} type={chatType} />
+          </Suspense>
+        );
       }
-      return <Chat guest={user} onLeave={handleLeaveChat} tags={chatTags} />;
+      return (
+        <Suspense fallback={<div className="h-screen w-full flex items-center justify-center bg-[#070913]"><Loader /></div>}>
+          <Chat guest={user} onLeave={handleLeaveChat} tags={chatTags} />
+        </Suspense>
+      );
     }
 
     // If user clicked on a friend
@@ -59,10 +70,12 @@ function App() {
   };
 
   return (
-    <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || "541369775233-g2p7l6kr6nm6sks3khhg77n36a3in5id.apps.googleusercontent.com"}>
-      <Toaster position="top-center" toastOptions={{ style: { background: '#1C2238', color: '#E8EEFF', border: '1px solid #232B47' } }} />
-      {renderContent()}
-    </GoogleOAuthProvider>
+    <ErrorBoundary>
+      <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || "541369775233-g2p7l6kr6nm6sks3khhg77n36a3in5id.apps.googleusercontent.com"}>
+        <Toaster position="top-center" toastOptions={{ style: { background: '#131729', color: '#f0f4ff', border: '1px solid rgba(255,255,255,0.05)' } }} />
+        {renderContent()}
+      </GoogleOAuthProvider>
+    </ErrorBoundary>
   );
 }
 

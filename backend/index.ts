@@ -38,6 +38,7 @@ const subClient = pubClient.duplicate();
 subClient.on("error", (err) => console.error("Redis subClient error:", err));
 const redisClient = pubClient.duplicate();
 redisClient.on("error", (err) => console.error("Redis redisClient error:", err));
+AnalyticsService.init(redisClient);
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-for-jwt";
@@ -88,6 +89,7 @@ const upload = multer({ storage });
 
 import crypto from "crypto";
 import { EmailService } from "./services/email.service";
+import { AnalyticsService } from "./services/analytics.service";
 
 const requireAuth = (req: any, res: any, next: any) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -164,19 +166,67 @@ app.get("/health", async (req, res) => {
 
 app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
   try {
-    const adjectives = ["Swift", "Calm", "Brave", "Quiet", "Fast", "Night"];
-    const nouns = ["Panda", "Otter", "Eagle", "Falcon", "Turtle", "Fox"];
-    const randomName = `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 100)}`;
+    let username = req.body.username;
     
+    if (username) {
+      username = username.trim();
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+        res.status(400).json({ success: false, error: "Username must be 3-20 characters, containing only letters, numbers, or underscores." });
+        return;
+      }
+      
+      const lowercase = username.toLowerCase();
+      
+      // Check active mapping
+      const activeUser = await redisClient.hget("peerly:active_usernames_map", lowercase);
+      if (activeUser) {
+        res.status(400).json({ success: false, error: "Username already taken" });
+        return;
+      }
+      
+      // Check registered database users
+      const dbUser = await prisma.user.findFirst({
+        where: { username: { equals: username, mode: 'insensitive' } }
+      });
+      if (dbUser) {
+        res.status(400).json({ success: false, error: "Username already taken" });
+        return;
+      }
+    } else {
+      // Generate a unique random username
+      const adjectives = ["Swift", "Calm", "Brave", "Quiet", "Fast", "Night"];
+      const nouns = ["Panda", "Otter", "Eagle", "Falcon", "Turtle", "Fox"];
+      let attempts = 0;
+      while (attempts < 10) {
+        const candidate = `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 100)}`;
+        const lowercase = candidate.toLowerCase();
+        
+        const activeUser = await redisClient.hget("peerly:active_usernames_map", lowercase);
+        const dbUser = await prisma.user.findFirst({
+          where: { username: { equals: candidate, mode: 'insensitive' } }
+        });
+        
+        if (!activeUser && !dbUser) {
+          username = candidate;
+          break;
+        }
+        attempts++;
+      }
+      
+      if (!username) {
+        username = `User_${Math.floor(1000 + Math.random() * 9000)}`;
+      }
+    }
+
     const guest = await prisma.guestSession.create({
       data: {
-        random_username: randomName,
+        random_username: username,
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
       }
     });
 
-    const token = jwt.sign({ id: guest.id, type: 'guest', username: randomName }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ success: true, token, user: { id: guest.id, username: randomName, type: 'guest' } });
+    const token = jwt.sign({ id: guest.id, type: 'guest', username }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ success: true, token, user: { id: guest.id, username, type: 'guest' } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, error: "Failed to create guest" });
@@ -613,213 +663,357 @@ app.get("/friends/:friendId/chat", requireAuth, async (req: any, res: any) => {
 
 // --- SOCKET.IO ---
 
-// JWT Middleware
+// Rate limit helper
+function isRateLimited(socket: any, actionType: string, limitMs: number): boolean {
+  const now = Date.now();
+  const key = `lastAction_${actionType}`;
+  if (socket[key] && now - socket[key] < limitMs) {
+    return true;
+  }
+  socket[key] = now;
+  return false;
+}
+
+// Escapes special HTML characters to prevent XSS/HTML Injection
+function sanitize(str: string): string {
+  return str.replace(/[&<>"']/g, (m) => {
+    switch (m) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#x27;';
+      default: return m;
+    }
+  });
+}
+
+// Room destruction helper
+async function destroyRoom(roomId: string, reason: string) {
+  const state = await redisClient.get(`room:${roomId}:state`);
+  if (!state || state === 'destroyed') return;
+  
+  await redisClient.set(`room:${roomId}:state`, 'destroyed');
+  io.to(roomId).emit("session:ended", { reason });
+  
+  const sockets = await io.in(roomId).fetchSockets();
+  for (const s of sockets) {
+    s.leave(roomId);
+    // @ts-ignore
+    s.currentRoom = null;
+    // @ts-ignore
+    s.currentSession = null;
+  }
+  
+  const users = await redisClient.smembers(`room:${roomId}:users`);
+  for (const userId of users) {
+    await redisClient.set(`user:${userId}:status`, 'online');
+  }
+
+  await redisClient.del(`room:${roomId}:state`);
+  await redisClient.del(`room:${roomId}:users`);
+}
+
+// Find Match algorithm matching tag-priorities with a 10s fallback
+async function findMatch(user: { id: string; username: string }, mode: string, tags: string[]): Promise<string | null> {
+  const globalQueueKey = `peerly:queue:${mode}:global`;
+  const startTime = Date.now();
+
+  const isValidCandidate = async (candidateId: string) => {
+    if (candidateId === user.id) return false;
+    const status = await redisClient.get(`user:${candidateId}:status`);
+    if (status !== 'waiting') return false;
+    const candidateMode = await redisClient.get(`user:${candidateId}:mode`);
+    if (candidateMode !== mode) return false;
+    
+    const sockets = await io.in(candidateId).fetchSockets();
+    if (sockets.length === 0) {
+      await redisClient.set(`user:${candidateId}:status`, 'offline');
+      return false;
+    }
+    return true;
+  };
+
+  // 1. Try Tag Matching first (if A has tags)
+  if (tags.length > 0) {
+    for (const tag of tags) {
+      const tagQueueKey = `peerly:queue:${mode}:tag:${tag}`;
+      let candidateId = await redisClient.lpop(tagQueueKey);
+      while (candidateId) {
+        if (await isValidCandidate(candidateId)) {
+          const duration = Date.now() - startTime;
+          await AnalyticsService.trackMatchmakingTime(duration);
+          return candidateId;
+        }
+        candidateId = await redisClient.lpop(tagQueueKey);
+      }
+    }
+  }
+
+  // 2. Try Global Queue matching
+  let candidateId = await redisClient.lpop(globalQueueKey);
+  const skippedCandidates: string[] = [];
+
+  while (candidateId) {
+    if (await isValidCandidate(candidateId)) {
+      const bTagsStr = await redisClient.get(`user:${candidateId}:tags`);
+      const bTags = bTagsStr ? JSON.parse(bTagsStr) : [];
+      const bJoinTime = Number(await redisClient.get(`user:${candidateId}:join_time`) || 0);
+      const isPriorityActive = bTags.length > 0 && (Date.now() - bJoinTime < 10000);
+      
+      const sharesTags = tags.some((t: string) => bTags.includes(t));
+      if (isPriorityActive && !sharesTags) {
+        // Skip for now since B is still waiting for their tags
+        skippedCandidates.push(candidateId);
+      } else {
+        // Match found B! Re-enqueue skipped users first
+        for (const skipped of skippedCandidates) {
+          await redisClient.lpush(globalQueueKey, skipped);
+        }
+        const duration = Date.now() - startTime;
+        await AnalyticsService.trackMatchmakingTime(duration);
+        return candidateId;
+      }
+    }
+    candidateId = await redisClient.lpop(globalQueueKey);
+  }
+
+  for (const skipped of skippedCandidates) {
+    await redisClient.lpush(globalQueueKey, skipped);
+  }
+
+  return null;
+}
+
+// JWT & Username Unique Registry Middleware
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error("Authentication error"));
   
-  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+  jwt.verify(token, JWT_SECRET, async (err: any, decoded: any) => {
     if (err) return next(new Error("Authentication error"));
+    
+    const lowercase = decoded.username.toLowerCase();
+    const existingUserId = await redisClient.hget("peerly:active_usernames_map", lowercase);
+    
+    if (existingUserId && existingUserId !== decoded.id) {
+      return next(new Error("Username already taken"));
+    }
+    
     // @ts-ignore
     socket.user = decoded;
     next();
   });
 });
 
-// Global queues are now dynamically generated based on type (e.g. queue:random_text:global)
 const onlineUsers = new Map<string, string>(); // userId -> socketId
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   // @ts-ignore
   const user = socket.user;
+  const usernameKey = user.username.toLowerCase();
+  
   console.log(`User connected: ${user.username} (${user.id})`);
   
+  // Register username in Redis and store original case mapping
+  await redisClient.hset("peerly:active_usernames_map", usernameKey, user.id);
+  await redisClient.set(`user:${user.id}:username`, user.username);
+  await redisClient.set(`user:${user.id}:status`, 'online');
+
   if (user.type === 'user') {
     onlineUsers.set(user.id, socket.id);
     io.emit("presence:update", { userId: user.id, status: "online" });
   }
 
-  // Matchmaking
+  // Matchmaking Room Queue Join
   socket.on("match:join", async (data, cb) => {
     try {
+      const sessionType: 'random_text' | 'random_video' | 'random_voice' = data?.type || "random_text";
       const tags: string[] = data?.tags || [];
-      const sessionType: string = data?.type || "random_text";
-      const globalQueueKey = `queue:${sessionType}:global`;
-      const userPayloadStr = JSON.stringify({ id: user.id, username: user.username });
+      const mode = sessionType.replace("random_", ""); // text, video, voice
       
-      let waitingUser = null;
-
-      // Helper to pop and validate
-      const tryPopValidUser = async (queueKey: string) => {
-        let poppedStr = await redisClient.lpop(queueKey);
-        while (poppedStr) {
-          const popped = JSON.parse(poppedStr);
-          if (popped.id !== user.id) {
-            const status = await redisClient.get(`user:${popped.id}:status`);
-            if (status === 'waiting') {
-              const sockets = await io.in(popped.id).fetchSockets();
-              if (sockets.length > 0) {
-                await redisClient.set(`user:${popped.id}:status`, 'matched');
-                return popped;
-              }
-            }
-          }
-          poppedStr = await redisClient.lpop(queueKey);
-        }
-        return null;
-      };
-
-      if (tags.length > 0) {
-        for (const tag of tags) {
-          waitingUser = await tryPopValidUser(`queue:${sessionType}:tag:${tag}`);
-          if (waitingUser) break;
-        }
-      } else {
-        waitingUser = await tryPopValidUser(globalQueueKey);
+      if (isRateLimited(socket, "join", 1000)) {
+        if (cb) cb({ success: false, error: "Matchmaking join rate limited." });
+        return;
       }
-      
-      if (waitingUser) {
-        // Match found!
+
+      // Leave previous rooms/cleanup active sessions
+      // @ts-ignore
+      if (socket.currentRoom) {
+        // @ts-ignore
+        await destroyRoom(socket.currentRoom, "skipped");
+      }
+
+      await redisClient.set(`user:${user.id}:status`, 'waiting');
+      await redisClient.set(`user:${user.id}:mode`, mode);
+      await redisClient.set(`user:${user.id}:tags`, JSON.stringify(tags));
+      await redisClient.set(`user:${user.id}:join_time`, Date.now().toString());
+
+      // Attempt to match
+      const matchId = await findMatch(user, mode, tags);
+
+      if (matchId) {
         await redisClient.set(`user:${user.id}:status`, 'matched');
+        await redisClient.set(`user:${matchId}:status`, 'matched');
         
         const chatSession = await prisma.chatSession.create({
           data: {
             type: sessionType,
-            participant_1_type: "guest", // Assuming guest for now or dynamically resolving
-            participant_1_id: waitingUser.id,
+            participant_1_type: "guest",
+            participant_1_id: matchId,
             participant_2_type: "guest",
             participant_2_id: user.id,
           }
         });
         
         const roomId = `room:${chatSession.id}`;
+        
+        await redisClient.set(`room:${roomId}:state`, 'matched');
+        await redisClient.sadd(`room:${roomId}:users`, user.id, matchId);
+        
+        // Connect both socket rooms
+        const partnerSockets = await io.in(matchId).fetchSockets();
+        for (const ps of partnerSockets) {
+          ps.join(roomId);
+          // @ts-ignore
+          ps.currentRoom = roomId;
+          // @ts-ignore
+          ps.currentSession = chatSession.id;
+        }
+        
         socket.join(roomId);
         // @ts-ignore
         socket.currentRoom = roomId;
         // @ts-ignore
         socket.currentSession = chatSession.id;
         
-        io.to(waitingUser.id).emit("session:start", { roomId, partnerId: user.id, sessionId: chatSession.id, partnerUsername: user.username });
-        socket.emit("session:start", { roomId, partnerId: waitingUser.id, sessionId: chatSession.id, partnerUsername: waitingUser.username });
-        if(cb && typeof cb === 'function') cb({ success: true, status: "matched", roomId });
-      } else {
-        await redisClient.set(`user:${user.id}:status`, 'waiting');
-        if (tags.length > 0) {
-          for (const tag of tags) {
-            await redisClient.rpush(`queue:${sessionType}:tag:${tag}`, userPayloadStr);
+        const partnerUsername = await redisClient.get(`user:${matchId}:username`) || "Stranger";
+
+        io.to(matchId).emit("session:start", { roomId, partnerId: user.id, sessionId: chatSession.id, partnerUsername: user.username });
+        socket.emit("session:start", { roomId, partnerId: matchId, sessionId: chatSession.id, partnerUsername });
+
+        // 15s WebRTC negotiation timeout
+        setTimeout(async () => {
+          const state = await redisClient.get(`room:${roomId}:state`);
+          if (state === 'matched' || state === 'connected') {
+            await destroyRoom(roomId, "timeout");
+            await AnalyticsService.trackConnectionSuccess(false);
           }
-        } else {
-          await redisClient.rpush(globalQueueKey, userPayloadStr);
+        }, 15000);
+
+        if (cb) cb({ success: true, status: "matched", roomId });
+      } else {
+        const globalQueueKey = `peerly:queue:${mode}:global`;
+        await redisClient.rpush(globalQueueKey, user.id);
+        for (const tag of tags) {
+          const tagQueueKey = `peerly:queue:${mode}:tag:${tag}`;
+          await redisClient.rpush(tagQueueKey, user.id);
         }
+        
         socket.join(user.id);
-        if(cb && typeof cb === 'function') cb({ success: true, status: "waiting" });
+        if (cb) cb({ success: true, status: "waiting" });
       }
     } catch (error) {
       console.error(error);
-      if(cb && typeof cb === 'function') cb({ success: false, error: "Failed to join queue" });
+      if (cb) cb({ success: false, error: "Failed to join matchmaking" });
     }
   });
 
-  // WebRTC Signaling
+  // WebRTC Signaling Events
   socket.on("webrtc:offer", (data) => {
-    console.log(`[WebRTC] Offer sent from ${user.username} to room ${data.roomId}`);
+    // @ts-ignore
+    if (!socket.currentRoom) return;
     socket.to(data.roomId).emit("webrtc:offer", { offer: data.offer, senderId: user.id });
   });
 
   socket.on("webrtc:answer", (data) => {
-    console.log(`[WebRTC] Answer sent from ${user.username} to room ${data.roomId}`);
+    // @ts-ignore
+    if (!socket.currentRoom) return;
     socket.to(data.roomId).emit("webrtc:answer", { answer: data.answer, senderId: user.id });
   });
 
   socket.on("webrtc:ice-candidate", (data) => {
-    if (process.env.DEBUG_WEBRTC === "true") {
-      console.log(`[WebRTC] ICE candidate from ${user.username} to room ${data.roomId}`);
-    }
+    // @ts-ignore
+    if (!socket.currentRoom) return;
     socket.to(data.roomId).emit("webrtc:ice-candidate", { candidate: data.candidate, senderId: user.id });
   });
 
-  socket.on("session:joined", (data) => {
+  socket.on("webrtc:connected", async (data) => {
+    const { roomId } = data;
+    await redisClient.set(`room:${roomId}:state`, 'active');
+    await AnalyticsService.trackConnectionSuccess(true);
+  });
+
+  socket.on("session:joined", async (data) => {
     const { roomId, sessionId } = data;
-    console.log(`[Socket] ${user.username} joined session room ${roomId}`);
-    socket.join(roomId);
     // @ts-ignore
     socket.currentRoom = roomId;
     // @ts-ignore
     socket.currentSession = sessionId;
+    socket.join(roomId);
+    
+    const usersInRoom = await redisClient.smembers(`room:${roomId}:users`);
+    if (usersInRoom.length >= 2) {
+      await redisClient.set(`room:${roomId}:state`, 'connected');
+    }
   });
 
+  // Leave room manually / Cancel search
   socket.on("match:leave", async () => {
-    await redisClient.set(`user:${user.id}:status`, 'offline');
-    await redisClient.lrem(`queue:random_text:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
-    await redisClient.lrem(`queue:random_video:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
-    await redisClient.lrem(`queue:random_voice:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
+    if (isRateLimited(socket, "leave", 500)) return;
+    
+    // Remove from queues
+    await redisClient.set(`user:${user.id}:status`, 'online');
+    
+    // Clean up queues
+    const modes = ["text", "voice", "video"];
+    for (const mode of modes) {
+      await redisClient.lrem(`peerly:queue:${mode}:global`, 0, user.id);
+    }
     
     // @ts-ignore
-    if (socket.currentSession && socket.currentRoom) {
-      // @ts-ignore
-      const { currentSession, currentRoom } = socket;
-      try {
-        await prisma.chatSession.update({
-          where: { id: currentSession },
-          data: { ended_at: new Date(), end_reason: "user_left" }
-        });
-        io.to(currentRoom).emit("session:ended", { reason: "partner_left" });
-      } catch (e) {
-        console.error(e);
-      }
-      // @ts-ignore
-      socket.currentSession = null;
-      // @ts-ignore
-      socket.currentRoom = null;
+    const roomId = socket.currentRoom;
+    if (roomId) {
+      await destroyRoom(roomId, "partner_left");
     }
   });
 
-  socket.on("match:skip", async (data) => {
-    // End current session
+  // User Skips match
+  socket.on("match:skip", async (data, cb) => {
+    if (isRateLimited(socket, "skip", 1000)) {
+      if (cb) cb({ success: false, error: "Skip rate limited." });
+      return;
+    }
+
     // @ts-ignore
-    if (socket.currentSession && socket.currentRoom) {
-      // @ts-ignore
-      const { currentSession, currentRoom } = socket;
-      try {
-        await prisma.chatSession.update({
-          where: { id: currentSession },
-          data: { ended_at: new Date(), end_reason: "skipped" }
-        });
-        socket.to(currentRoom).emit("session:ended", { reason: "partner_skipped" });
-        socket.leave(currentRoom);
-      } catch (e) {
-        console.error(e);
-      }
-      // @ts-ignore
-      socket.currentSession = null;
-      // @ts-ignore
-      socket.currentRoom = null;
+    const roomId = socket.currentRoom;
+    if (roomId) {
+      await destroyRoom(roomId, "partner_skipped");
+      await AnalyticsService.trackSkip();
     }
     
-    // Join queue again
-    const { type = 'random_text', tags = [] } = data || {};
-    const userPayloadStr = JSON.stringify({ id: user.id, username: user.username });
-    await redisClient.set(`user:${user.id}:status`, 'waiting');
-    
-    if (tags.length > 0) {
-      for (const tag of tags) {
-        await redisClient.rpush(`queue:${type}:tag:${tag}`, userPayloadStr);
-      }
-    } else {
-      await redisClient.rpush(`queue:${type}:global`, userPayloadStr);
-    }
-    if (typeof data?.cb === 'function') data.cb({ success: true, status: "waiting" });
+    if (cb) cb({ success: true });
   });
 
+  // Text message sending (XSS sanitized, length verified)
   socket.on("message:send", async (data) => {
     const { roomId, message, sessionId } = data;
+    if (!message || message.trim() === "") return;
+    
+    if (isRateLimited(socket, "message", 150)) {
+      socket.emit("message:error", { error: "You are sending messages too fast." });
+      return;
+    }
+
+    const cleanMessage = sanitize(message.trim()).slice(0, 1000); // 1000 chars limit
+
     try {
       const msg = await prisma.message.create({
         data: {
           chat_session_id: sessionId,
           sender_type: user.type,
           sender_id: user.id,
-          content: message,
+          content: cleanMessage,
           message_type: "text"
         }
       });
@@ -841,42 +1035,38 @@ io.on("connection", (socket) => {
 
   socket.on("session:end", async (data) => {
     const { roomId, sessionId } = data;
-    // @ts-ignore
-    socket.currentRoom = null;
-    // @ts-ignore
-    socket.currentSession = null;
-    try {
-      await prisma.chatSession.update({
-        where: { id: sessionId },
-        data: { ended_at: new Date(), end_reason: "user_left" }
-      });
-      io.to(roomId).emit("session:ended", { reason: "partner_left" });
-    } catch (e) {
-      console.error(e);
+    if (roomId) {
+      await destroyRoom(roomId, "partner_left");
     }
   });
 
-  socket.on("disconnect", async () => {
-    await redisClient.set(`user:${user.id}:status`, 'offline');
-    await redisClient.lrem(`queue:random_text:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
-    await redisClient.lrem(`queue:random_video:global`, 0, JSON.stringify({ id: user.id, username: user.username }));
-    
-    // @ts-ignore
-    if (socket.currentSession && socket.currentRoom) {
-      // @ts-ignore
-      const { currentSession, currentRoom } = socket;
-      try {
-        await prisma.chatSession.update({
-          where: { id: currentSession },
-          data: { ended_at: new Date(), end_reason: "disconnected" }
-        });
-        io.to(currentRoom).emit("session:ended", { reason: "disconnected" });
-      } catch (e) {
-        console.error(e);
-      }
+  // Socket Disconnection
+  socket.on("disconnect", async (reason) => {
+    console.log(`User disconnected: ${user.username}. Reason: ${reason}`);
+    await AnalyticsService.trackDisconnectReason(reason);
+
+    // Fetch active sockets under user ID to handle multi-tab/reconnects
+    const activeSockets = await io.in(user.id).fetchSockets();
+    if (activeSockets.length === 0) {
+      // Release guest username case-insensitively
+      await redisClient.hdel("peerly:active_usernames_map", usernameKey);
+      await redisClient.set(`user:${user.id}:status`, 'offline');
+      await redisClient.del(`user:${user.id}:username`);
     }
 
-    console.log(`User disconnected: ${user.username}`);
+    // Clean up matchmaking lists
+    const modes = ["text", "voice", "video"];
+    for (const mode of modes) {
+      await redisClient.lrem(`peerly:queue:${mode}:global`, 0, user.id);
+    }
+
+    // Destroy active room
+    // @ts-ignore
+    const roomId = socket.currentRoom;
+    if (roomId) {
+      await destroyRoom(roomId, "disconnected");
+    }
+
     if (user.type === 'user') {
       onlineUsers.delete(user.id);
       io.emit("presence:update", { userId: user.id, status: "offline" });
