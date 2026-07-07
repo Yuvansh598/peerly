@@ -15,6 +15,9 @@ import RedisStore from "rate-limit-redis";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
+import { EmailService } from "./services/email.service";
+import { AnalyticsService } from "./services/analytics.service";
 
 import { v2 as cloudinary } from "cloudinary";
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
@@ -87,9 +90,7 @@ if (process.env.CLOUDINARY_URL) {
 }
 const upload = multer({ storage });
 
-import crypto from "crypto";
-import { EmailService } from "./services/email.service";
-import { AnalyticsService } from "./services/analytics.service";
+
 
 const requireAuth = (req: any, res: any, next: any) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -804,10 +805,12 @@ io.use((socket, next) => {
   jwt.verify(token, JWT_SECRET, async (err: any, decoded: any) => {
     if (err) return next(new Error("Authentication error"));
     
+    console.log(`[Auth Middleware] Authenticating token for ${decoded.username} (${decoded.id}), Type: ${decoded.type}`);
     const lowercase = decoded.username.toLowerCase();
     const existingUserId = await redisClient.hget("peerly:active_usernames_map", lowercase);
     
     if (existingUserId && existingUserId !== decoded.id) {
+      console.warn(`[Auth Middleware] Rejecting connection: username taken by ${existingUserId}`);
       return next(new Error("Username already taken"));
     }
     
@@ -824,7 +827,7 @@ io.on("connection", async (socket) => {
   const user = socket.user;
   const usernameKey = user.username.toLowerCase();
   
-  console.log(`User connected: ${user.username} (${user.id})`);
+  console.log(`[Connection] User connected: ${user.username} (${user.id}), Type: ${user.type}, Socket ID: ${socket.id}`);
   
   // Register username in Redis and store original case mapping
   await redisClient.hset("peerly:active_usernames_map", usernameKey, user.id);
@@ -844,6 +847,8 @@ io.on("connection", async (socket) => {
       const tags: string[] = data?.tags || [];
       const mode = sessionType.replace("random_", ""); // text, video, voice
       
+      console.log(`[Queue Event] match:join received from ${user.username} (${user.id}). Mode: ${mode}, Tags: ${tags}`);
+      
       if (isRateLimited(socket, "join", 1000)) {
         if (cb) cb({ success: false, error: "Matchmaking join rate limited." });
         return;
@@ -852,6 +857,7 @@ io.on("connection", async (socket) => {
       // Leave previous rooms/cleanup active sessions
       // @ts-ignore
       if (socket.currentRoom) {
+        console.log(`[Queue Event] ${user.username} leaving current active room ${(socket as any).currentRoom} before re-joining`);
         // @ts-ignore
         await destroyRoom(socket.currentRoom, "skipped");
       }
@@ -860,31 +866,37 @@ io.on("connection", async (socket) => {
       await redisClient.set(`user:${user.id}:mode`, mode);
       await redisClient.set(`user:${user.id}:tags`, JSON.stringify(tags));
       await redisClient.set(`user:${user.id}:join_time`, Date.now().toString());
+      await redisClient.set(`user:${user.id}:type`, user.type);
 
       // Attempt to match
       const matchId = await findMatch(user, mode, tags);
 
       if (matchId) {
+        console.log(`[Match Found] Match succeeded! ${user.username} (${user.id}) matched with ${matchId}`);
         await redisClient.set(`user:${user.id}:status`, 'matched');
         await redisClient.set(`user:${matchId}:status`, 'matched');
+        
+        const matchType = await redisClient.get(`user:${matchId}:type`) || "guest";
         
         const chatSession = await prisma.chatSession.create({
           data: {
             type: sessionType,
-            participant_1_type: "guest",
+            participant_1_type: matchType,
             participant_1_id: matchId,
-            participant_2_type: "guest",
+            participant_2_type: user.type,
             participant_2_id: user.id,
           }
         });
         
         const roomId = `room:${chatSession.id}`;
+        console.log(`[Room Created] Room ${roomId} created in matched state`);
         
         await redisClient.set(`room:${roomId}:state`, 'matched');
         await redisClient.sadd(`room:${roomId}:users`, user.id, matchId);
         
         // Connect both socket rooms
         const partnerSockets = await io.in(matchId).fetchSockets();
+        console.log(`[Signaling] Connecting sockets for partner ${matchId}. Active sockets: ${partnerSockets.length}`);
         for (const ps of partnerSockets) {
           ps.join(roomId);
           // @ts-ignore
@@ -901,6 +913,7 @@ io.on("connection", async (socket) => {
         
         const partnerUsername = await redisClient.get(`user:${matchId}:username`) || "Stranger";
 
+        console.log(`[Session Emit] session:start dispatched to ${user.id} and ${matchId}`);
         io.to(matchId).emit("session:start", { roomId, partnerId: user.id, sessionId: chatSession.id, partnerUsername: user.username });
         socket.emit("session:start", { roomId, partnerId: matchId, sessionId: chatSession.id, partnerUsername });
 
@@ -908,6 +921,7 @@ io.on("connection", async (socket) => {
         setTimeout(async () => {
           const state = await redisClient.get(`room:${roomId}:state`);
           if (state === 'matched' || state === 'connected') {
+            console.log(`[Watchdog] WebRTC negotiation timeout for room ${roomId}. Rematching...`);
             await destroyRoom(roomId, "timeout");
             await AnalyticsService.trackConnectionSuccess(false);
           }
@@ -916,9 +930,11 @@ io.on("connection", async (socket) => {
         if (cb) cb({ success: true, status: "matched", roomId });
       } else {
         const globalQueueKey = `peerly:queue:${mode}:global`;
+        console.log(`[Queue Push] User ${user.username} (${user.id}) pushed to global queue: ${globalQueueKey}`);
         await redisClient.rpush(globalQueueKey, user.id);
         for (const tag of tags) {
           const tagQueueKey = `peerly:queue:${mode}:tag:${tag}`;
+          console.log(`[Queue Push] User ${user.username} pushed to tag queue: ${tagQueueKey}`);
           await redisClient.rpush(tagQueueKey, user.id);
         }
         
@@ -926,7 +942,7 @@ io.on("connection", async (socket) => {
         if (cb) cb({ success: true, status: "waiting" });
       }
     } catch (error) {
-      console.error(error);
+      console.error(`[Queue Error] match:join error:`, error);
       if (cb) cb({ success: false, error: "Failed to join matchmaking" });
     }
   });
@@ -934,30 +950,41 @@ io.on("connection", async (socket) => {
   // WebRTC Signaling Events
   socket.on("webrtc:offer", (data) => {
     // @ts-ignore
-    if (!socket.currentRoom) return;
+    if (!socket.currentRoom) {
+      console.warn(`[Signaling Offer Blocked] ${user.username} sent webrtc:offer but socket.currentRoom is null/undefined! Room ID: ${data.roomId}`);
+      return;
+    }
+    console.log(`[Signaling Offer] Relaying offer from ${user.username} (${user.id}) to room ${data.roomId}`);
     socket.to(data.roomId).emit("webrtc:offer", { offer: data.offer, senderId: user.id });
   });
 
   socket.on("webrtc:answer", (data) => {
     // @ts-ignore
-    if (!socket.currentRoom) return;
+    if (!socket.currentRoom) {
+      console.warn(`[Signaling Answer Blocked] ${user.username} sent webrtc:answer but socket.currentRoom is null/undefined! Room ID: ${data.roomId}`);
+      return;
+    }
+    console.log(`[Signaling Answer] Relaying answer from ${user.username} (${user.id}) to room ${data.roomId}`);
     socket.to(data.roomId).emit("webrtc:answer", { answer: data.answer, senderId: user.id });
   });
 
   socket.on("webrtc:ice-candidate", (data) => {
     // @ts-ignore
     if (!socket.currentRoom) return;
+    console.log(`[Signaling ICE] Relaying ICE candidate from ${user.username} (${user.id}) to room ${data.roomId}`);
     socket.to(data.roomId).emit("webrtc:ice-candidate", { candidate: data.candidate, senderId: user.id });
   });
 
   socket.on("webrtc:connected", async (data) => {
     const { roomId } = data;
+    console.log(`[WebRTC Connected] Connection state active for room ${roomId}`);
     await redisClient.set(`room:${roomId}:state`, 'active');
     await AnalyticsService.trackConnectionSuccess(true);
   });
 
   socket.on("session:joined", async (data) => {
     const { roomId, sessionId } = data;
+    console.log(`[Signaling Join] session:joined received from ${user.username} (${user.id}) for room ${roomId}`);
     // @ts-ignore
     socket.currentRoom = roomId;
     // @ts-ignore
@@ -1054,12 +1081,13 @@ io.on("connection", async (socket) => {
 
   // Socket Disconnection
   socket.on("disconnect", async (reason) => {
-    console.log(`User disconnected: ${user.username}. Reason: ${reason}`);
+    console.log(`[Disconnect] User disconnected: ${user.username} (${user.id}). Reason: ${reason}`);
     await AnalyticsService.trackDisconnectReason(reason);
 
     // Fetch active sockets under user ID to handle multi-tab/reconnects
     const activeSockets = await io.in(user.id).fetchSockets();
     if (activeSockets.length === 0) {
+      console.log(`[Cleanup] Releasing username registry and setting offline status for ${user.username} (${user.id})`);
       // Release guest username case-insensitively
       await redisClient.hdel("peerly:active_usernames_map", usernameKey);
       await redisClient.set(`user:${user.id}:status`, 'offline');
@@ -1076,6 +1104,7 @@ io.on("connection", async (socket) => {
     // @ts-ignore
     const roomId = socket.currentRoom;
     if (roomId) {
+      console.log(`[Disconnect Room Cleanup] Destroying room ${roomId} due to disconnect of ${user.username}`);
       await destroyRoom(roomId, "disconnected");
     }
 

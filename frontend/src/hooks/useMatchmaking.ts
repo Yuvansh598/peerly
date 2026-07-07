@@ -28,8 +28,8 @@ export const useMatchmaking = (
     setPartnerId(null);
     setEndReason(null);
 
-    const join = () => {
-      if (statusRef.current === 'waiting') {
+    const join = (force: boolean = false) => {
+      if (force || statusRef.current === 'waiting') {
         socket.emit('match:join', { type: chatType, tags }, (res: any) => {
           if (res.success) {
             if (res.status === 'matched') {
@@ -45,9 +45,9 @@ export const useMatchmaking = (
     };
 
     if (socket.connected) {
-      join();
+      join(true);
     } else {
-      socket.once('connect', join);
+      socket.once('connect', () => join(false));
     }
   }, [chatType, tags]);
 
