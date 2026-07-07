@@ -73,6 +73,7 @@ export const useMatchmaking = (
       setSessionId(data.sessionId);
       setPartnerId(data.partnerId);
       setPartnerUsername(data.partnerUsername);
+      socket.emit('session:joined', data);
       onSessionStart(data);
     };
 

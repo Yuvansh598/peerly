@@ -721,10 +721,21 @@ async function findMatch(user: { id: string; username: string }, mode: string, t
 
   const isValidCandidate = async (candidateId: string) => {
     if (candidateId === user.id) return false;
-    const status = await redisClient.get(`user:${candidateId}:status`);
-    if (status !== 'waiting') return false;
+    
+    // Atomically set status to 'matched' if it was 'waiting' to avoid race conditions
+    const prevStatus = await redisClient.getset(`user:${candidateId}:status`, 'matched');
+    if (prevStatus !== 'waiting') {
+      if (prevStatus === 'offline') {
+        await redisClient.set(`user:${candidateId}:status`, 'offline');
+      }
+      return false;
+    }
+    
     const candidateMode = await redisClient.get(`user:${candidateId}:mode`);
-    if (candidateMode !== mode) return false;
+    if (candidateMode !== mode) {
+      await redisClient.set(`user:${candidateId}:status`, 'waiting');
+      return false;
+    }
     
     const sockets = await io.in(candidateId).fetchSockets();
     if (sockets.length === 0) {
@@ -819,6 +830,7 @@ io.on("connection", async (socket) => {
   await redisClient.hset("peerly:active_usernames_map", usernameKey, user.id);
   await redisClient.set(`user:${user.id}:username`, user.username);
   await redisClient.set(`user:${user.id}:status`, 'online');
+  socket.join(user.id);
 
   if (user.type === 'user') {
     onlineUsers.set(user.id, socket.id);
