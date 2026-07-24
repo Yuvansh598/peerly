@@ -18,6 +18,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { EmailService } from "./services/email.service";
 import { AnalyticsService } from "./services/analytics.service";
+import { logger } from "./logger";
 
 import { v2 as cloudinary } from "cloudinary";
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
@@ -25,7 +26,7 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 dotenv.config();
 
 if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
-  console.error("FATAL: FRONTEND_URL environment variable is required in production.");
+  logger.error("FATAL: FRONTEND_URL environment variable is required in production.");
   process.exit(1);
 }
 
@@ -36,11 +37,11 @@ const prisma = new PrismaClient();
 
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
 const pubClient = new Redis(redisUrl);
-pubClient.on("error", (err) => console.error("Redis pubClient error:", err));
+pubClient.on("error", (err) => logger.error("Redis pubClient error", { error: err.message }));
 const subClient = pubClient.duplicate();
-subClient.on("error", (err) => console.error("Redis subClient error:", err));
+subClient.on("error", (err) => logger.error("Redis subClient error", { error: err.message }));
 const redisClient = pubClient.duplicate();
-redisClient.on("error", (err) => console.error("Redis redisClient error:", err));
+redisClient.on("error", (err) => logger.error("Redis redisClient error", { error: err.message }));
 AnalyticsService.init(redisClient);
 
 const PORT = process.env.PORT || 3001;
@@ -48,6 +49,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-for-jwt";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+const serverStartTime = Date.now();
 
 const io = new Server(httpServer, {
   cors: {
@@ -89,8 +91,6 @@ if (process.env.CLOUDINARY_URL) {
   });
 }
 const upload = multer({ storage });
-
-
 
 const requireAuth = (req: any, res: any, next: any) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -165,6 +165,72 @@ app.get("/health", async (req, res) => {
   });
 });
 
+app.get("/stats", async (req, res) => {
+  try {
+    const stats = await getLiveStats();
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch stats" });
+  }
+});
+
+// Internal Diagnostics Endpoint (Admin Monitoring - Section 8)
+app.get("/admin/diagnostics", async (req, res) => {
+  try {
+    const memory = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    const uptimeSeconds = Math.floor((Date.now() - serverStartTime) / 1000);
+    const redisPing = await redisClient.ping().catch(() => "FAILED");
+    const socketCount = io.engine ? io.engine.clientsCount : 0;
+    const roomKeys = await redisClient.keys("room:*:state");
+    
+    const textQueueCount = await redisClient.zcard("peerly:queue:text:zset");
+    const voiceQueueCount = await redisClient.zcard("peerly:queue:voice:zset");
+    const videoQueueCount = await redisClient.zcard("peerly:queue:video:zset");
+
+    const analytics = await AnalyticsService.getStats();
+
+    res.json({
+      status: "healthy",
+      serverUptimeSeconds: uptimeSeconds,
+      process: {
+        nodeVersion: process.version,
+        pid: process.pid,
+        memoryUsage: {
+          rssMB: Math.round(memory.rss / (1024 * 1024)),
+          heapTotalMB: Math.round(memory.heapTotal / (1024 * 1024)),
+          heapUsedMB: Math.round(memory.heapUsed / (1024 * 1024)),
+          externalMB: Math.round(memory.external / (1024 * 1024))
+        },
+        cpuUsageMicroseconds: cpu
+      },
+      services: {
+        redisStatus: redisPing === "PONG" ? "connected" : "error",
+        socketCount,
+        activeRoomsCount: roomKeys.length,
+        queues: {
+          text: textQueueCount,
+          voice: voiceQueueCount,
+          video: videoQueueCount
+        }
+      },
+      analytics: {
+        successfulConnections: analytics?.successfulConnections || 0,
+        failedConnections: analytics?.failedConnections || 0,
+        connectionSuccessRate: analytics?.connectionSuccessRate || 100,
+        avgMatchTimeMs: Math.round(analytics?.averageMatchmakingTimeMs || 0),
+        avgSessionDurationSec: Math.round((analytics?.averageSessionDurationMs || 0) / 1000),
+        avgICECompletionTimeMs: Math.round(analytics?.averageICECompletionTimeMs || 0),
+        messagesToday: analytics?.messagesToday || 0,
+        dailyPeakUsers: analytics?.dailyPeakUsers || 0
+      }
+    });
+  } catch (e: any) {
+    logger.error("Error in admin diagnostics endpoint", { error: e.message });
+    res.status(500).json({ error: "Failed to generate diagnostics" });
+  }
+});
+
 app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
   try {
     let username = req.body.username;
@@ -178,14 +244,12 @@ app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
       
       const lowercase = username.toLowerCase();
       
-      // Check active mapping
       const activeUser = await redisClient.hget("peerly:active_usernames_map", lowercase);
       if (activeUser) {
         res.status(400).json({ success: false, error: "Username already taken" });
         return;
       }
       
-      // Check registered database users
       const dbUser = await prisma.user.findFirst({
         where: { username: { equals: username, mode: 'insensitive' } }
       });
@@ -194,7 +258,6 @@ app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
         return;
       }
     } else {
-      // Generate a unique random username
       const adjectives = ["Swift", "Calm", "Brave", "Quiet", "Fast", "Night"];
       const nouns = ["Panda", "Otter", "Eagle", "Falcon", "Turtle", "Fox"];
       let attempts = 0;
@@ -228,8 +291,8 @@ app.post("/auth/guest", globalAuthLimiter, async (req, res) => {
 
     const token = jwt.sign({ id: guest.id, type: 'guest', username }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ success: true, token, user: { id: guest.id, username, type: 'guest' } });
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    logger.error("Failed to create guest session", { error: error.message });
     res.status(500).json({ success: false, error: "Failed to create guest" });
   }
 });
@@ -254,7 +317,6 @@ app.post("/auth/register", registerLimiter, async (req, res) => {
     });
     if (existing) return res.status(400).json({ error: "Email or username taken" });
 
-    // Verify OTP
     const otpRecord = await prisma.otp.findUnique({ where: { email } });
     if (!otpRecord) return res.status(400).json({ error: "No pending OTP for this email" });
     if (otpRecord.expires_at < new Date()) {
@@ -279,8 +341,8 @@ app.post("/auth/register", registerLimiter, async (req, res) => {
 
     const token = jwt.sign({ id: user.id, type: 'user', username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { id: user.id, username: user.username, type: 'user' } });
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    logger.error("Registration error", { error: error.message });
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -303,11 +365,12 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
 
     const token = jwt.sign({ id: user.id, type: 'user', username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { id: user.id, username: user.username, type: 'user' } });
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    logger.error("Login error", { error: error.message });
     res.status(500).json({ error: "Server error" });
   }
 });
+
 const emailSchema = z.object({ email: z.string().email("Invalid email address") });
 
 app.post("/auth/otp/send", otpLimiter, async (req, res) => {
@@ -316,17 +379,12 @@ app.post("/auth/otp/send", otpLimiter, async (req, res) => {
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0].message });
     const { email } = parsed.data;
 
-    // Generate a secure 6 digit code
     const code = crypto.randomInt(100000, 999999).toString();
-    const expires_at = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expires_at = new Date(Date.now() + 10 * 60 * 1000);
 
-    // Hash the code before storing
     const hashedCode = await argon2.hash(code);
-
-    // Send email first to prevent partial state if email fails
     await EmailService.sendOTPEmail(email, code);
 
-    // Store in DB, update if exists
     await prisma.otp.upsert({
       where: { email },
       update: { code: hashedCode, expires_at, created_at: new Date() },
@@ -334,8 +392,8 @@ app.post("/auth/otp/send", otpLimiter, async (req, res) => {
     });
 
     res.json({ success: true });
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    logger.error("OTP Send error", { error: error.message });
     res.status(500).json({ error: "Failed to send OTP email" });
   }
 });
@@ -355,10 +413,8 @@ app.post("/auth/otp/verify", globalAuthLimiter, async (req, res) => {
     const isValid = await argon2.verify(otp.code, code);
     if (!isValid) return res.status(400).json({ error: "Invalid code" });
 
-    // Mark used by deleting
     await prisma.otp.delete({ where: { email } });
 
-    // Check if user exists
     const user = await prisma.user.findUnique({ where: { email } });
     if (user) {
       const token = jwt.sign({ id: user.id, type: 'user', username: user.username }, JWT_SECRET, { expiresIn: '7d' });
@@ -370,8 +426,8 @@ app.post("/auth/otp/verify", globalAuthLimiter, async (req, res) => {
         email
       });
     }
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    logger.error("OTP Verify error", { error: error.message });
     res.status(500).json({ error: "Server error verifying OTP" });
   }
 });
@@ -393,11 +449,9 @@ app.post("/auth/google/verify", globalAuthLimiter, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email } });
 
     if (user) {
-      // User exists, log them in
       const token = jwt.sign({ id: user.id, type: 'user', username: user.username }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({ success: true, isNewUser: false, token, user: { id: user.id, username: user.username, type: 'user' } });
     } else {
-      // New user, send back data for Complete Profile step
       return res.json({
         success: true,
         isNewUser: true,
@@ -409,8 +463,8 @@ app.post("/auth/google/verify", globalAuthLimiter, async (req, res) => {
         }
       });
     }
-  } catch (error) {
-    console.error("Google Auth Error:", error);
+  } catch (error: any) {
+    logger.error("Google Auth Error", { error: error.message });
     res.status(500).json({ error: "Authentication failed" });
   }
 });
@@ -452,13 +506,13 @@ app.post("/auth/google/register", globalAuthLimiter, upload.single('avatar'), as
 
     const token = jwt.sign({ id: user.id, type: 'user', username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { id: user.id, username: user.username, type: 'user' } });
-  } catch (error) {
-    console.error("Google Register Error:", error);
+  } catch (error: any) {
+    logger.error("Google Register Error", { error: error.message });
     res.status(500).json({ error: "Registration failed" });
   }
 });
 
-// --- USER & FRIEND ENDPOINTS (PHASE 4) ---
+// --- USER & FRIEND ENDPOINTS ---
 
 app.get("/users/me", requireAuth, async (req: any, res: any) => {
   try {
@@ -475,7 +529,6 @@ app.get("/users/me", requireAuth, async (req: any, res: any) => {
       include: { user_a: { select: { id: true, username: true, display_name: true, avatar_url: true } } }
     });
     
-    // Normalize friendships
     const activeFriends = [
       ...friendshipsA.map(f => ({ ...f, friend: f.user_b })),
       ...friendshipsB.map(f => ({ ...f, friend: f.user_a }))
@@ -487,7 +540,8 @@ app.get("/users/me", requireAuth, async (req: any, res: any) => {
     });
     
     res.json({ user, friendships: activeFriends, pendingRequests });
-  } catch (e) {
+  } catch (e: any) {
+    logger.error("Fetch user profile error", { error: e.message });
     res.status(500).json({ error: "Failed to fetch profile" });
   }
 });
@@ -510,7 +564,8 @@ app.put("/users/me", requireAuth, upload.single('avatar'), async (req: any, res:
       data: { display_name, bio, ...(avatar_url && { avatar_url }) }
     });
     res.json({ success: true, user: updated });
-  } catch (e) {
+  } catch (e: any) {
+    logger.error("Update profile error", { error: e.message });
     res.status(500).json({ error: "Failed to update profile" });
   }
 });
@@ -518,25 +573,21 @@ app.put("/users/me", requireAuth, upload.single('avatar'), async (req: any, res:
 app.delete("/users/me", requireAuth, async (req: any, res: any) => {
   try {
     const userId = req.user.id;
-    // Delete friendships
     await prisma.friendship.deleteMany({
       where: { OR: [{ user_a_id: userId }, { user_b_id: userId }] }
     });
-    // Delete friend requests
     await prisma.friendRequest.deleteMany({
       where: { OR: [{ sender_id: userId }, { receiver_id: userId }] }
     });
-    // Delete messages
     await prisma.message.deleteMany({
       where: { sender_id: userId }
     });
-    // Delete user
     await prisma.user.delete({
       where: { id: userId }
     });
     res.json({ success: true });
-  } catch (e) {
-    console.error("Delete user error:", e);
+  } catch (e: any) {
+    logger.error("Delete user error", { error: e.message, userId: req.user?.id });
     res.status(500).json({ error: "Failed to delete account" });
   }
 });
@@ -571,25 +622,24 @@ app.post("/friends/request", requireAuth, async (req: any, res: any) => {
       data: { sender_id: req.user.id, receiver_id: targetUserId, status: 'pending' }
     });
     
-    // Notify the target user to refresh their dashboard
     io.to(targetUserId).emit('presence:update');
-    
     res.json({ success: true, request });
-  } catch (e) {
+  } catch (e: any) {
+    logger.error("Friend request error", { error: e.message });
     res.status(500).json({ error: "Failed to send friend request" });
   }
 });
 
 app.post("/friends/respond", requireAuth, async (req: any, res: any) => {
   try {
-    const { requestId, action } = req.body; // action: 'accept' | 'decline'
+    const { requestId, action } = req.body;
     const request = await prisma.friendRequest.findUnique({ where: { id: requestId } });
     
     if (!request || request.receiver_id !== req.user.id) {
       return res.status(403).json({ error: "Not authorized" });
     }
 
-    if (action === 'accept') {
+    if (action === 'accept' || action === 'accepted') {
       await prisma.$transaction([
         prisma.friendRequest.update({
           where: { id: requestId },
@@ -599,18 +649,17 @@ app.post("/friends/respond", requireAuth, async (req: any, res: any) => {
           data: { user_a_id: request.sender_id, user_b_id: request.receiver_id }
         })
       ]);
-      // Notify the sender that their request was accepted
       io.to(request.sender_id).emit('presence:update');
     } else {
       await prisma.friendRequest.update({
         where: { id: requestId },
         data: { status: 'declined', responded_at: new Date() }
       });
-      // Notify the sender that their request was declined
       io.to(request.sender_id).emit('presence:update');
     }
     res.json({ success: true });
-  } catch (e) {
+  } catch (e: any) {
+    logger.error("Friend request respond error", { error: e.message });
     res.status(500).json({ error: "Failed to respond to request" });
   }
 });
@@ -656,15 +705,16 @@ app.get("/friends/:friendId/chat", requireAuth, async (req: any, res: any) => {
     }
 
     res.json({ success: true, chatSession });
-  } catch (e) {
-    console.error(e);
+  } catch (e: any) {
+    logger.error("Friend chat load error", { error: e.message });
     res.status(500).json({ error: "Failed to load chat history" });
   }
 });
 
-// --- SOCKET.IO ---
+// --- SOCKET.IO & MATCHMAKING SYSTEM ---
 
-// Rate limit helper
+const onlineUsers = new Map<string, string>();
+
 function isRateLimited(socket: any, actionType: string, limitMs: number): boolean {
   const now = Date.now();
   const key = `lastAction_${actionType}`;
@@ -675,7 +725,6 @@ function isRateLimited(socket: any, actionType: string, limitMs: number): boolea
   return false;
 }
 
-// Escapes special HTML characters to prevent XSS/HTML Injection
 function sanitize(str: string): string {
   return str.replace(/[&<>"']/g, (m) => {
     switch (m) {
@@ -689,21 +738,112 @@ function sanitize(str: string): string {
   });
 }
 
+// Live Dashboard Stats aggregator
+async function getLiveStats() {
+  const now = Date.now();
+  const uptime = Math.floor((now - serverStartTime) / 1000);
+  const onlineCount = onlineUsers.size;
+
+  const textQueueCount = await redisClient.zcard("peerly:queue:text:zset");
+  const voiceQueueCount = await redisClient.zcard("peerly:queue:voice:zset");
+  const videoQueueCount = await redisClient.zcard("peerly:queue:video:zset");
+  const searchingUsers = textQueueCount + voiceQueueCount + videoQueueCount;
+
+  const roomKeys = await redisClient.keys("room:*:state");
+  let totalActiveRooms = 0;
+  let activeTextChats = 0;
+  let activeVoiceChats = 0;
+  let activeVideoChats = 0;
+
+  for (const key of roomKeys) {
+    const state = await redisClient.get(key);
+    if (state === 'matched' || state === 'connected' || state === 'active') {
+      totalActiveRooms++;
+      const roomId = key.split(":")[1];
+      const mode = await redisClient.get(`room:${roomId}:mode`);
+      if (mode === 'random_text') activeTextChats++;
+      else if (mode === 'random_voice') activeVoiceChats++;
+      else if (mode === 'random_video') activeVideoChats++;
+    }
+  }
+
+  const analytics = await AnalyticsService.getStats();
+  const matchesToday = Number(await redisClient.get("peerly:analytics:matches_today") || 0);
+
+  return {
+    onlineUsers: onlineCount,
+    searchingUsers,
+    usersInTextQueue: textQueueCount,
+    usersInVoiceQueue: voiceQueueCount,
+    usersInVideoQueue: videoQueueCount,
+    totalActiveRooms,
+    activeTextChats,
+    activeVoiceChats,
+    activeVideoChats,
+    matchesToday,
+    messagesToday: analytics?.messagesToday || 0,
+    dailyPeakUsers: analytics?.dailyPeakUsers || onlineCount,
+    successfulConnections: analytics?.successfulConnections || 0,
+    failedConnections: analytics?.failedConnections || 0,
+    averageMatchTime: Math.round(analytics?.averageMatchmakingTimeMs || 0),
+    averageSessionTime: Math.round(analytics?.averageSessionDurationMs ? analytics.averageSessionDurationMs / 1000 : 0),
+    averageICECompletionTime: Math.round(analytics?.averageICECompletionTimeMs || 0),
+    serverUptime: uptime
+  };
+}
+
+function broadcastStats() {
+  getLiveStats().then(stats => {
+    if (stats) {
+      io.emit("dashboard:stats", stats);
+    }
+  }).catch(err => logger.error("Error broadcasting stats", { error: err.message }));
+}
+
+// Queue cleanup helper
+async function removeFromAllQueues(userId: string) {
+  const modes = ["text", "voice", "video"];
+  for (const mode of modes) {
+    await redisClient.zrem(`peerly:queue:${mode}:zset`, userId);
+    await redisClient.lrem(`peerly:queue:${mode}:global`, 0, userId);
+  }
+  
+  const tagsStr = await redisClient.get(`user:${userId}:tags`);
+  if (tagsStr) {
+    try {
+      const tags: string[] = JSON.parse(tagsStr);
+      const mode = await redisClient.get(`user:${userId}:mode`);
+      if (mode) {
+        for (const tag of tags) {
+          await redisClient.lrem(`peerly:queue:${mode}:tag:${tag}`, 0, userId);
+        }
+      }
+    } catch (e) {}
+  }
+  await redisClient.del(`user:${userId}:mode`, `user:${userId}:tags`, `user:${userId}:join_time`);
+}
+
 // Room destruction helper
 async function destroyRoom(roomId: string, reason: string) {
   const state = await redisClient.get(`room:${roomId}:state`);
   if (!state || state === 'destroyed') return;
   
+  const startTimeStr = await redisClient.get(`room:${roomId}:start_time`);
+  if (startTimeStr) {
+    const duration = Date.now() - Number(startTimeStr);
+    await AnalyticsService.trackSessionDuration(duration);
+  }
+  
+  logger.info(`Destroying room ${roomId}`, { roomId, reason });
+
   await redisClient.set(`room:${roomId}:state`, 'destroyed');
   io.to(roomId).emit("session:ended", { reason });
   
   const sockets = await io.in(roomId).fetchSockets();
   for (const s of sockets) {
     s.leave(roomId);
-    // @ts-ignore
-    s.currentRoom = null;
-    // @ts-ignore
-    s.currentSession = null;
+    s.data.currentRoom = null;
+    s.data.currentSession = null;
   }
   
   const users = await redisClient.smembers(`room:${roomId}:users`);
@@ -711,93 +851,86 @@ async function destroyRoom(roomId: string, reason: string) {
     await redisClient.set(`user:${userId}:status`, 'online');
   }
 
-  await redisClient.del(`room:${roomId}:state`);
-  await redisClient.del(`room:${roomId}:users`);
+  await redisClient.del(
+    `room:${roomId}:state`,
+    `room:${roomId}:users`,
+    `room:${roomId}:mode`,
+    `room:${roomId}:start_time`,
+    `room:${roomId}:webrtc_start`
+  );
+
+  broadcastStats();
 }
 
-// Find Match algorithm matching tag-priorities with a 10s fallback
+// Atomic claim of a candidate
+async function claimCandidate(candidateId: string, expectedMode: string): Promise<boolean> {
+  const sockets = await io.in(candidateId).fetchSockets();
+  if (sockets.length === 0) {
+    await redisClient.set(`user:${candidateId}:status`, 'offline');
+    return false;
+  }
+
+  const candidateMode = await redisClient.get(`user:${candidateId}:mode`);
+  if (candidateMode !== expectedMode) {
+    return false;
+  }
+
+  const luaScript = `
+    if redis.call("get", KEYS[1]) == "waiting" then
+      redis.call("set", KEYS[1], "matched")
+      return 1
+    else
+      return 0
+    end
+  `;
+
+  const claimed = await redisClient.eval(luaScript, 1, `user:${candidateId}:status`);
+  return claimed === 1;
+}
+
+// Sorted Set FIFO Matchmaking algorithm
 async function findMatch(user: { id: string; username: string }, mode: string, tags: string[]): Promise<string | null> {
-  const globalQueueKey = `peerly:queue:${mode}:global`;
+  const zsetKey = `peerly:queue:${mode}:zset`;
   const startTime = Date.now();
 
-  const isValidCandidate = async (candidateId: string) => {
-    if (candidateId === user.id) return false;
-    
-    // Atomically set status to 'matched' if it was 'waiting' to avoid race conditions
-    const prevStatus = await redisClient.getset(`user:${candidateId}:status`, 'matched');
-    if (prevStatus !== 'waiting') {
-      if (prevStatus === 'offline') {
-        await redisClient.set(`user:${candidateId}:status`, 'offline');
-      }
-      return false;
-    }
-    
-    const candidateMode = await redisClient.get(`user:${candidateId}:mode`);
-    if (candidateMode !== mode) {
-      await redisClient.set(`user:${candidateId}:status`, 'waiting');
-      return false;
-    }
-    
-    const sockets = await io.in(candidateId).fetchSockets();
-    if (sockets.length === 0) {
-      await redisClient.set(`user:${candidateId}:status`, 'offline');
-      return false;
-    }
-    return true;
-  };
-
-  // 1. Try Tag Matching first (if A has tags)
+  // 1. Tag matching
   if (tags.length > 0) {
     for (const tag of tags) {
       const tagQueueKey = `peerly:queue:${mode}:tag:${tag}`;
       let candidateId = await redisClient.lpop(tagQueueKey);
       while (candidateId) {
-        if (await isValidCandidate(candidateId)) {
-          const duration = Date.now() - startTime;
-          await AnalyticsService.trackMatchmakingTime(duration);
-          return candidateId;
+        if (candidateId !== user.id) {
+          const claimed = await claimCandidate(candidateId, mode);
+          if (claimed) {
+            await removeFromAllQueues(candidateId);
+            await AnalyticsService.trackMatchmakingTime(Date.now() - startTime);
+            return candidateId;
+          }
         }
         candidateId = await redisClient.lpop(tagQueueKey);
       }
     }
   }
 
-  // 2. Try Global Queue matching
-  let candidateId = await redisClient.lpop(globalQueueKey);
-  const skippedCandidates: string[] = [];
+  // 2. Sorted Set FIFO Queue lookup
+  const candidates = await redisClient.zrange(zsetKey, 0, 20);
+  for (const candidateId of candidates) {
+    if (candidateId === user.id) continue;
 
-  while (candidateId) {
-    if (await isValidCandidate(candidateId)) {
-      const bTagsStr = await redisClient.get(`user:${candidateId}:tags`);
-      const bTags = bTagsStr ? JSON.parse(bTagsStr) : [];
-      const bJoinTime = Number(await redisClient.get(`user:${candidateId}:join_time`) || 0);
-      const isPriorityActive = bTags.length > 0 && (Date.now() - bJoinTime < 10000);
-      
-      const sharesTags = tags.some((t: string) => bTags.includes(t));
-      if (isPriorityActive && !sharesTags) {
-        // Skip for now since B is still waiting for their tags
-        skippedCandidates.push(candidateId);
-      } else {
-        // Match found B! Re-enqueue skipped users first
-        for (const skipped of skippedCandidates) {
-          await redisClient.lpush(globalQueueKey, skipped);
-        }
-        const duration = Date.now() - startTime;
-        await AnalyticsService.trackMatchmakingTime(duration);
-        return candidateId;
-      }
+    const claimed = await claimCandidate(candidateId, mode);
+    if (claimed) {
+      await removeFromAllQueues(candidateId);
+      await AnalyticsService.trackMatchmakingTime(Date.now() - startTime);
+      return candidateId;
+    } else {
+      await redisClient.zrem(zsetKey, candidateId);
     }
-    candidateId = await redisClient.lpop(globalQueueKey);
-  }
-
-  for (const skipped of skippedCandidates) {
-    await redisClient.lpush(globalQueueKey, skipped);
   }
 
   return null;
 }
 
-// JWT & Username Unique Registry Middleware
+// JWT & Username Auth Middleware
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error("Authentication error"));
@@ -805,12 +938,11 @@ io.use((socket, next) => {
   jwt.verify(token, JWT_SECRET, async (err: any, decoded: any) => {
     if (err) return next(new Error("Authentication error"));
     
-    console.log(`[Auth Middleware] Authenticating token for ${decoded.username} (${decoded.id}), Type: ${decoded.type}`);
     const lowercase = decoded.username.toLowerCase();
     const existingUserId = await redisClient.hget("peerly:active_usernames_map", lowercase);
     
     if (existingUserId && existingUserId !== decoded.id) {
-      console.warn(`[Auth Middleware] Rejecting connection: username taken by ${existingUserId}`);
+      logger.warn("Rejecting socket connection: username taken", { username: decoded.username, userId: decoded.id });
       return next(new Error("Username already taken"));
     }
     
@@ -820,16 +952,13 @@ io.use((socket, next) => {
   });
 });
 
-const onlineUsers = new Map<string, string>(); // userId -> socketId
-
 io.on("connection", async (socket) => {
   // @ts-ignore
   const user = socket.user;
   const usernameKey = user.username.toLowerCase();
   
-  console.log(`[Connection] User connected: ${user.username} (${user.id}), Type: ${user.type}, Socket ID: ${socket.id}`);
+  logger.info("User connected", { socketId: socket.id, username: user.username, userId: user.id });
   
-  // Register username in Redis and store original case mapping
   await redisClient.hset("peerly:active_usernames_map", usernameKey, user.id);
   await redisClient.set(`user:${user.id}:username`, user.username);
   await redisClient.set(`user:${user.id}:status`, 'online');
@@ -838,29 +967,34 @@ io.on("connection", async (socket) => {
   if (user.type === 'user') {
     onlineUsers.set(user.id, socket.id);
     io.emit("presence:update", { userId: user.id, status: "online" });
+    await AnalyticsService.trackPeakUsers(onlineUsers.size);
   }
 
-  // Matchmaking Room Queue Join
+  broadcastStats();
+
+  socket.on("dashboard:request-stats", async () => {
+    const stats = await getLiveStats();
+    socket.emit("dashboard:stats", stats);
+  });
+
+  // Matchmaking Queue Join
   socket.on("match:join", async (data, cb) => {
     try {
       const sessionType: 'random_text' | 'random_video' | 'random_voice' = data?.type || "random_text";
       const tags: string[] = data?.tags || [];
-      const mode = sessionType.replace("random_", ""); // text, video, voice
+      const mode = sessionType.replace("random_", "");
       
-      console.log(`[Queue Event] match:join received from ${user.username} (${user.id}). Mode: ${mode}, Tags: ${tags}`);
+      logger.info("match:join request", { socketId: socket.id, userId: user.id, mode, tags });
       
-      if (isRateLimited(socket, "join", 1000)) {
+      if (isRateLimited(socket, "join", 500)) {
         if (cb) cb({ success: false, error: "Matchmaking join rate limited." });
         return;
       }
 
-      // Leave previous rooms/cleanup active sessions
-      // @ts-ignore
-      if (socket.currentRoom) {
-        console.log(`[Queue Event] ${user.username} leaving current active room ${(socket as any).currentRoom} before re-joining`);
-        // @ts-ignore
-        await destroyRoom(socket.currentRoom, "skipped");
+      if (socket.data.currentRoom) {
+        await destroyRoom(socket.data.currentRoom, "skipped");
       }
+      await removeFromAllQueues(user.id);
 
       await redisClient.set(`user:${user.id}:status`, 'waiting');
       await redisClient.set(`user:${user.id}:mode`, mode);
@@ -868,14 +1002,16 @@ io.on("connection", async (socket) => {
       await redisClient.set(`user:${user.id}:join_time`, Date.now().toString());
       await redisClient.set(`user:${user.id}:type`, user.type);
 
-      // Attempt to match
       const matchId = await findMatch(user, mode, tags);
 
       if (matchId) {
-        console.log(`[Match Found] Match succeeded! ${user.username} (${user.id}) matched with ${matchId}`);
+        logger.info("Match created", { userId: user.id, partnerId: matchId, mode });
+        await removeFromAllQueues(user.id);
+
         await redisClient.set(`user:${user.id}:status`, 'matched');
         await redisClient.set(`user:${matchId}:status`, 'matched');
-        
+        await redisClient.incr("peerly:analytics:matches_today");
+
         const matchType = await redisClient.get(`user:${matchId}:type`) || "guest";
         
         const chatSession = await prisma.chatSession.create({
@@ -889,143 +1025,133 @@ io.on("connection", async (socket) => {
         });
         
         const roomId = `room:${chatSession.id}`;
-        console.log(`[Room Created] Room ${roomId} created in matched state`);
         
         await redisClient.set(`room:${roomId}:state`, 'matched');
+        await redisClient.set(`room:${roomId}:mode`, sessionType);
+        await redisClient.set(`room:${roomId}:start_time`, Date.now().toString());
+        await redisClient.set(`room:${roomId}:webrtc_start`, Date.now().toString());
         await redisClient.sadd(`room:${roomId}:users`, user.id, matchId);
         
-        // Connect both socket rooms
         const partnerSockets = await io.in(matchId).fetchSockets();
-        console.log(`[Signaling] Connecting sockets for partner ${matchId}. Active sockets: ${partnerSockets.length}`);
         for (const ps of partnerSockets) {
           ps.join(roomId);
-          // @ts-ignore
-          ps.currentRoom = roomId;
-          // @ts-ignore
-          ps.currentSession = chatSession.id;
+          ps.data.currentRoom = roomId;
+          ps.data.currentSession = chatSession.id;
         }
         
         socket.join(roomId);
-        // @ts-ignore
-        socket.currentRoom = roomId;
-        // @ts-ignore
-        socket.currentSession = chatSession.id;
+        socket.data.currentRoom = roomId;
+        socket.data.currentSession = chatSession.id;
         
         const partnerUsername = await redisClient.get(`user:${matchId}:username`) || "Stranger";
+        const userIsCaller = user.id < matchId;
 
-        console.log(`[Session Emit] session:start dispatched to ${user.id} and ${matchId}`);
-        io.to(matchId).emit("session:start", { roomId, partnerId: user.id, sessionId: chatSession.id, partnerUsername: user.username });
-        socket.emit("session:start", { roomId, partnerId: matchId, sessionId: chatSession.id, partnerUsername });
+        io.to(matchId).emit("session:start", {
+          roomId,
+          partnerId: user.id,
+          sessionId: chatSession.id,
+          partnerUsername: user.username,
+          isCaller: !userIsCaller
+        });
 
-        // 15s WebRTC negotiation timeout
+        socket.emit("session:start", {
+          roomId,
+          partnerId: matchId,
+          sessionId: chatSession.id,
+          partnerUsername,
+          isCaller: userIsCaller
+        });
+
         setTimeout(async () => {
           const state = await redisClient.get(`room:${roomId}:state`);
-          if (state === 'matched' || state === 'connected') {
-            console.log(`[Watchdog] WebRTC negotiation timeout for room ${roomId}. Rematching...`);
+          if (state === 'matched') {
+            logger.warn("WebRTC negotiation watchdog timed out", { roomId });
             await destroyRoom(roomId, "timeout");
             await AnalyticsService.trackConnectionSuccess(false);
           }
         }, 15000);
 
+        broadcastStats();
         if (cb) cb({ success: true, status: "matched", roomId });
       } else {
-        const globalQueueKey = `peerly:queue:${mode}:global`;
-        console.log(`[Queue Push] User ${user.username} (${user.id}) pushed to global queue: ${globalQueueKey}`);
-        await redisClient.rpush(globalQueueKey, user.id);
+        const zsetKey = `peerly:queue:${mode}:zset`;
+        await redisClient.zadd(zsetKey, Date.now(), user.id);
+        
         for (const tag of tags) {
           const tagQueueKey = `peerly:queue:${mode}:tag:${tag}`;
-          console.log(`[Queue Push] User ${user.username} pushed to tag queue: ${tagQueueKey}`);
           await redisClient.rpush(tagQueueKey, user.id);
         }
         
-        socket.join(user.id);
+        broadcastStats();
         if (cb) cb({ success: true, status: "waiting" });
       }
-    } catch (error) {
-      console.error(`[Queue Error] match:join error:`, error);
+    } catch (error: any) {
+      logger.error("match:join error", { error: error.message, userId: user.id });
       if (cb) cb({ success: false, error: "Failed to join matchmaking" });
     }
   });
 
-  // WebRTC Signaling Events
+  // WebRTC Signaling Events with payload validation & room ownership verification
   socket.on("webrtc:offer", (data) => {
-    // @ts-ignore
-    if (!socket.currentRoom) {
-      console.warn(`[Signaling Offer Blocked] ${user.username} sent webrtc:offer but socket.currentRoom is null/undefined! Room ID: ${data.roomId}`);
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (!roomId || !socket.rooms.has(roomId) || !data?.offer) {
+      logger.warn("webrtc:offer blocked - invalid payload or room ownership", { socketId: socket.id, roomId });
       return;
     }
-    console.log(`[Signaling Offer] Relaying offer from ${user.username} (${user.id}) to room ${data.roomId}`);
-    socket.to(data.roomId).emit("webrtc:offer", { offer: data.offer, senderId: user.id });
+    socket.to(roomId).emit("webrtc:offer", { offer: data.offer, senderId: user.id });
   });
 
   socket.on("webrtc:answer", (data) => {
-    // @ts-ignore
-    if (!socket.currentRoom) {
-      console.warn(`[Signaling Answer Blocked] ${user.username} sent webrtc:answer but socket.currentRoom is null/undefined! Room ID: ${data.roomId}`);
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (!roomId || !socket.rooms.has(roomId) || !data?.answer) {
+      logger.warn("webrtc:answer blocked - invalid payload or room ownership", { socketId: socket.id, roomId });
       return;
     }
-    console.log(`[Signaling Answer] Relaying answer from ${user.username} (${user.id}) to room ${data.roomId}`);
-    socket.to(data.roomId).emit("webrtc:answer", { answer: data.answer, senderId: user.id });
+    socket.to(roomId).emit("webrtc:answer", { answer: data.answer, senderId: user.id });
   });
 
   socket.on("webrtc:ice-candidate", (data) => {
-    // @ts-ignore
-    if (!socket.currentRoom) return;
-    console.log(`[Signaling ICE] Relaying ICE candidate from ${user.username} (${user.id}) to room ${data.roomId}`);
-    socket.to(data.roomId).emit("webrtc:ice-candidate", { candidate: data.candidate, senderId: user.id });
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (!roomId || !socket.rooms.has(roomId) || !data?.candidate) return;
+    socket.to(roomId).emit("webrtc:ice-candidate", { candidate: data.candidate, senderId: user.id });
   });
 
   socket.on("webrtc:connected", async (data) => {
-    const { roomId } = data;
-    console.log(`[WebRTC Connected] Connection state active for room ${roomId}`);
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (!roomId || !socket.rooms.has(roomId)) return;
+
+    const webrtcStartStr = await redisClient.get(`room:${roomId}:webrtc_start`);
+    if (webrtcStartStr) {
+      const iceDuration = Date.now() - Number(webrtcStartStr);
+      await AnalyticsService.trackICECompletionTime(iceDuration);
+    }
+
+    logger.info("WebRTC connected", { roomId, userId: user.id });
     await redisClient.set(`room:${roomId}:state`, 'active');
     await AnalyticsService.trackConnectionSuccess(true);
+    broadcastStats();
   });
 
-  socket.on("session:joined", async (data) => {
-    const { roomId, sessionId } = data;
-    console.log(`[Signaling Join] session:joined received from ${user.username} (${user.id}) for room ${roomId}`);
-    // @ts-ignore
-    socket.currentRoom = roomId;
-    // @ts-ignore
-    socket.currentSession = sessionId;
-    socket.join(roomId);
-    
-    const usersInRoom = await redisClient.smembers(`room:${roomId}:users`);
-    if (usersInRoom.length >= 2) {
-      await redisClient.set(`room:${roomId}:state`, 'connected');
-    }
-  });
-
-  // Leave room manually / Cancel search
   socket.on("match:leave", async () => {
-    if (isRateLimited(socket, "leave", 500)) return;
+    if (isRateLimited(socket, "leave", 300)) return;
     
-    // Remove from queues
+    await removeFromAllQueues(user.id);
     await redisClient.set(`user:${user.id}:status`, 'online');
     
-    // Clean up queues
-    const modes = ["text", "voice", "video"];
-    for (const mode of modes) {
-      await redisClient.lrem(`peerly:queue:${mode}:global`, 0, user.id);
-    }
-    
-    // @ts-ignore
-    const roomId = socket.currentRoom;
+    const roomId = socket.data.currentRoom;
     if (roomId) {
       await destroyRoom(roomId, "partner_left");
     }
+    broadcastStats();
   });
 
-  // User Skips match
   socket.on("match:skip", async (data, cb) => {
-    if (isRateLimited(socket, "skip", 1000)) {
+    if (isRateLimited(socket, "skip", 500)) {
       if (cb) cb({ success: false, error: "Skip rate limited." });
       return;
     }
 
-    // @ts-ignore
-    const roomId = socket.currentRoom;
+    const roomId = socket.data.currentRoom;
     if (roomId) {
       await destroyRoom(roomId, "partner_skipped");
       await AnalyticsService.trackSkip();
@@ -1034,17 +1160,17 @@ io.on("connection", async (socket) => {
     if (cb) cb({ success: true });
   });
 
-  // Text message sending (XSS sanitized, length verified)
   socket.on("message:send", async (data) => {
-    const { roomId, message, sessionId } = data;
-    if (!message || message.trim() === "") return;
+    const { message, sessionId } = data;
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (!message || !message.trim() || !roomId || !socket.rooms.has(roomId)) return;
     
     if (isRateLimited(socket, "message", 150)) {
       socket.emit("message:error", { error: "You are sending messages too fast." });
       return;
     }
 
-    const cleanMessage = sanitize(message.trim()).slice(0, 1000); // 1000 chars limit
+    const cleanMessage = sanitize(message.trim()).slice(0, 1000);
 
     try {
       const msg = await prisma.message.create({
@@ -1056,55 +1182,46 @@ io.on("connection", async (socket) => {
           message_type: "text"
         }
       });
+      await AnalyticsService.trackMessageSent();
       io.to(roomId).emit("message:receive", msg);
-    } catch (e) {
-      console.error(e);
+      broadcastStats();
+    } catch (e: any) {
+      logger.error("message:send error", { error: e.message, roomId });
     }
   });
 
   socket.on("typing:start", (data) => {
-    const { roomId } = data;
-    socket.to(roomId).emit("typing:start", { senderId: user.id });
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (roomId && socket.rooms.has(roomId)) socket.to(roomId).emit("typing:start", { senderId: user.id });
   });
 
   socket.on("typing:stop", (data) => {
-    const { roomId } = data;
-    socket.to(roomId).emit("typing:stop", { senderId: user.id });
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (roomId && socket.rooms.has(roomId)) socket.to(roomId).emit("typing:stop", { senderId: user.id });
   });
 
   socket.on("session:end", async (data) => {
-    const { roomId, sessionId } = data;
-    if (roomId) {
+    const roomId = data?.roomId || socket.data.currentRoom;
+    if (roomId && socket.rooms.has(roomId)) {
       await destroyRoom(roomId, "partner_left");
     }
   });
 
-  // Socket Disconnection
   socket.on("disconnect", async (reason) => {
-    console.log(`[Disconnect] User disconnected: ${user.username} (${user.id}). Reason: ${reason}`);
+    logger.info("User disconnected", { socketId: socket.id, username: user.username, userId: user.id, reason });
     await AnalyticsService.trackDisconnectReason(reason);
 
-    // Fetch active sockets under user ID to handle multi-tab/reconnects
+    await removeFromAllQueues(user.id);
+
     const activeSockets = await io.in(user.id).fetchSockets();
     if (activeSockets.length === 0) {
-      console.log(`[Cleanup] Releasing username registry and setting offline status for ${user.username} (${user.id})`);
-      // Release guest username case-insensitively
       await redisClient.hdel("peerly:active_usernames_map", usernameKey);
       await redisClient.set(`user:${user.id}:status`, 'offline');
       await redisClient.del(`user:${user.id}:username`);
     }
 
-    // Clean up matchmaking lists
-    const modes = ["text", "voice", "video"];
-    for (const mode of modes) {
-      await redisClient.lrem(`peerly:queue:${mode}:global`, 0, user.id);
-    }
-
-    // Destroy active room
-    // @ts-ignore
-    const roomId = socket.currentRoom;
+    const roomId = socket.data.currentRoom;
     if (roomId) {
-      console.log(`[Disconnect Room Cleanup] Destroying room ${roomId} due to disconnect of ${user.username}`);
       await destroyRoom(roomId, "disconnected");
     }
 
@@ -1112,9 +1229,11 @@ io.on("connection", async (socket) => {
       onlineUsers.delete(user.id);
       io.emit("presence:update", { userId: user.id, status: "offline" });
     }
+
+    broadcastStats();
   });
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  logger.info(`Server running on port ${PORT}`);
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { socket } from '../socket';
 import { Shield, X, Send, SkipForward, Copy, Smile, Check } from 'lucide-react';
 import clsx from 'clsx';
@@ -9,15 +9,11 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { ConnectionStatus } from './ui/ConnectionStatus';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useMatchmaking } from '../hooks/useMatchmaking';
 
 const EMOJIS = ['😀', '😂', '😍', '🙏', '👍', '🔥', '✨', '💯'];
 
 export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () => void; tags?: string[] }) => {
-  const [status, setStatus] = useState<'idle' | 'waiting' | 'matched' | 'ended'>('idle');
-  const [roomId, setRoomId] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [, setPartnerId] = useState<string | null>(null);
-  const [partnerUsername, setPartnerUsername] = useState<string | null>(null);
   const [messages, setMessages] = useState<{id: string, senderId: string, content: string, time: string, delivered: boolean}[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -27,48 +23,41 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<any>(null);
-  const statusRef = useRef(status);
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+
+  const handleSessionStart = useCallback((_data: { roomId: string; partnerId: string; sessionId: string; partnerUsername: string }) => {
+    setMessages([]);
+    setStartTime(Date.now());
+  }, []);
+
+  const handleSessionEnd = useCallback((_reason: string) => {
+    setPartnerTyping(false);
+  }, []);
+
+  const {
+    matchStatus,
+    roomId,
+    sessionId,
+    partnerUsername,
+    startSearch,
+    skipMatch,
+    leaveChat
+  } = useMatchmaking('random_text', tags, handleSessionStart, handleSessionEnd);
 
   useEffect(() => {
-    socket.connect();
-    
-    const handleConnect = () => {
-      if (statusRef.current === 'idle' || statusRef.current === 'waiting') {
-        setStatus('waiting');
-        socket.emit('match:join', { type: 'random_text', tags }, (res: any) => {
-          if (res.success && res.status === 'matched') {
-            setStatus('matched');
-            setRoomId(res.roomId);
-          }
-        });
-      }
+    startSearch();
+    return () => {
+      leaveChat();
     };
+  }, []);
 
-    if (socket.connected) {
-      handleConnect();
-    }
-    socket.on('connect', handleConnect);
-
-    const handleSessionStart = (data: any) => {
-      setStatus('matched');
-      setRoomId(data.roomId);
-      setSessionId(data.sessionId);
-      setPartnerId(data.partnerId);
-      setPartnerUsername(data.partnerUsername || null);
-      setMessages([]);
-      setStartTime(Date.now());
-      socket.emit('session:joined', data);
-    };
-
+  // Listen for text message & typing events
+  useEffect(() => {
     const handleMessageReceive = (msg: any) => {
       setMessages(prev => [...prev, {
         id: msg.id || Math.random().toString(),
         senderId: msg.sender_id,
         content: msg.content,
-        time: new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+        time: new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         delivered: true
       }]);
       setPartnerTyping(false);
@@ -77,26 +66,16 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
     const handleTypingStart = () => setPartnerTyping(true);
     const handleTypingStop = () => setPartnerTyping(false);
 
-    const handleSessionEnded = () => {
-      setStatus('ended');
-      setPartnerTyping(false);
-    };
-
-    socket.on('session:start', handleSessionStart);
     socket.on('message:receive', handleMessageReceive);
     socket.on('typing:start', handleTypingStart);
     socket.on('typing:stop', handleTypingStop);
-    socket.on('session:ended', handleSessionEnded);
 
     return () => {
-      socket.off('connect', handleConnect);
-      socket.off('session:start', handleSessionStart);
       socket.off('message:receive', handleMessageReceive);
       socket.off('typing:start', handleTypingStart);
       socket.off('typing:stop', handleTypingStop);
-      socket.off('session:ended', handleSessionEnded);
     };
-  }, [guest.id, tags]);
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -104,7 +83,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
 
   const handleSend = (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!input.trim() || status !== 'matched') return;
+    if (!input.trim() || matchStatus !== 'matched' || !roomId) return;
     
     socket.emit('message:send', { roomId, message: input, senderId: guest.id, sessionId });
     setInput('');
@@ -123,9 +102,9 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
 
   const handleTyping = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
-    if (val.length > 1000) return; // Enforce local limits
+    if (val.length > 1000) return;
     setInput(val);
-    if (status !== 'matched') return;
+    if (matchStatus !== 'matched' || !roomId) return;
 
     if (!isTyping) {
       setIsTyping(true);
@@ -140,23 +119,13 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
   };
 
   const handleSkip = () => {
-    socket.emit('match:skip', null, (res: any) => {
-      if (res.success) {
-        setStatus('waiting');
-        setMessages([]);
-        setStartTime(null);
-        socket.emit('match:join', { type: 'random_text', tags }, (joinRes: any) => {
-          if (joinRes.success && joinRes.status === 'matched') {
-            setStatus('matched');
-            setRoomId(joinRes.roomId);
-          }
-        });
-      }
-    });
+    setMessages([]);
+    setStartTime(null);
+    skipMatch();
   };
 
   const handleLeave = () => {
-    if (roomId && sessionId) socket.emit('match:leave');
+    leaveChat();
     onLeave();
   };
 
@@ -172,7 +141,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
     );
   };
 
-  if (status === 'waiting') {
+  if (matchStatus === 'waiting') {
     return <SearchingScreen onCancel={handleLeave} />;
   }
 
@@ -188,7 +157,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
             <span className="font-bold text-base leading-tight">
               {partnerUsername ? `@${partnerUsername}` : 'Stranger'}
             </span>
-            {startTime && <div className="text-xs mt-0.5"><ConnectionStatus status={status} /></div>}
+            {startTime && <div className="text-xs mt-0.5"><ConnectionStatus status={matchStatus} /></div>}
           </div>
         </div>
 
@@ -272,7 +241,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
         )}
         
         <AnimatePresence>
-          {status === 'ended' && (
+          {matchStatus === 'ended' && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
               <motion.div 
                 initial={{ scale: 0.95, opacity: 0 }}
@@ -340,7 +309,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
               onChange={handleTyping}
               onKeyDown={handleKeyDown}
               placeholder="Type message..."
-              disabled={status === 'ended'}
+              disabled={matchStatus === 'ended'}
               className="flex-1 bg-transparent border-none outline-none text-sm resize-none max-h-32 min-h-[44px] py-3 px-2 leading-relaxed custom-scrollbar disabled:opacity-50 disabled:cursor-not-allowed text-[#f0f4ff]"
               rows={1}
             />
@@ -352,7 +321,7 @@ export const Chat = ({ guest, onLeave, tags = [] }: { guest: any; onLeave: () =>
           </div>
           <Button 
             onClick={() => handleSend()}
-            disabled={!input.trim() || status === 'ended'}
+            disabled={!input.trim() || matchStatus === 'ended'}
             variant="primary"
             className="h-[56px] w-[56px] rounded-2xl shrink-0 p-0 flex items-center justify-center"
           >

@@ -13,6 +13,7 @@ export type WebRTCStats = {
     srflx: number;
     host: number;
   };
+  selectedCandidatePair?: string | null;
   localMedia: boolean;
   remoteMedia: boolean;
 };
@@ -23,8 +24,8 @@ export const WebRTCDebugPanel = ({ stats }: { stats: WebRTCStats }) => {
   if (!isDebug) return null;
 
   return (
-    <div className="absolute top-4 left-4 z-50 p-4 rounded-lg bg-black/80 text-green-400 font-mono text-xs shadow-lg border border-green-900 pointer-events-none min-w-[200px]">
-      <div className="font-bold border-b border-green-800 pb-2 mb-2 text-green-300">WebRTC Debug</div>
+    <div className="absolute top-4 left-4 z-50 p-4 rounded-lg bg-black/80 text-green-400 font-mono text-xs shadow-lg border border-green-900 pointer-events-none min-w-[220px]">
+      <div className="font-bold border-b border-green-800 pb-2 mb-2 text-green-300">WebRTC Diagnostics</div>
       
       <div className="mb-2">
         <div className="text-gray-400">Socket:</div>
@@ -33,7 +34,7 @@ export const WebRTCDebugPanel = ({ stats }: { stats: WebRTCStats }) => {
       
       <div className="mb-2">
         <div className="text-gray-400">Room:</div>
-        <div>{stats.roomId || 'None'}</div>
+        <div className="truncate max-w-[180px]">{stats.roomId || 'None'}</div>
       </div>
       
       <div className="mb-2">
@@ -54,6 +55,13 @@ export const WebRTCDebugPanel = ({ stats }: { stats: WebRTCStats }) => {
         <div className="pl-2">host: {stats.candidates.host}</div>
       </div>
       
+      {stats.selectedCandidatePair && (
+        <div className="mb-2">
+          <div className="text-gray-400">Active Candidate Pair:</div>
+          <div className="text-cyan-300">{stats.selectedCandidatePair}</div>
+        </div>
+      )}
+
       <div className="mb-2">
         <div className="text-gray-400">ICE State:</div>
         <div>{stats.iceState || 'new'}</div>
@@ -65,14 +73,14 @@ export const WebRTCDebugPanel = ({ stats }: { stats: WebRTCStats }) => {
       </div>
 
       <div className="mb-2">
-        <div className="text-gray-400">TURN:</div>
-        <div>{ICE_SERVERS.length > 1 ? 'Enabled' : 'Disabled (STUN only)'}</div>
+        <div className="text-gray-400">TURN Relay:</div>
+        <div>{ICE_SERVERS.length > 2 ? 'Active / Configured' : 'STUN Only (Fallback)'}</div>
       </div>
       
       <div>
-        <div className="text-gray-400">Media:</div>
-        <div>Local {stats.localMedia ? '✓' : '✗'}</div>
-        <div>Remote {stats.remoteMedia ? '✓' : '✗'}</div>
+        <div className="text-gray-400">Media Tracks:</div>
+        <div>Local Stream {stats.localMedia ? '✓' : '✗'}</div>
+        <div>Remote Stream {stats.remoteMedia ? '✓' : '✗'}</div>
       </div>
     </div>
   );

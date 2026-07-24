@@ -17,9 +17,49 @@ export const useWebRTC = (
   const [connectionState, setConnectionState] = useState<RTCPeerConnectionState>('new');
   const [iceConnectionState, setIceConnectionState] = useState<RTCIceConnectionState>('new');
 
+  // Candidate diagnostics counters
+  const [candidateCounts, setCandidateCounts] = useState({ total: 0, relay: 0, srflx: 0, host: 0 });
+  const [selectedCandidatePair, setSelectedCandidatePair] = useState<string | null>(null);
+
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef(0);
+  
+  // Perfect Negotiation State Refs
+  const politeRef = useRef<boolean>(false);
+  const makingOfferRef = useRef<boolean>(false);
+  const ignoreOfferRef = useRef<boolean>(false);
+  
+  // ICE candidate buffer for candidate events arriving before remote description is set
+  const iceCandidateBufferRef = useRef<RTCIceCandidateInit[]>([]);
+  const hasRemoteDescriptionRef = useRef<boolean>(false);
+
+  // Stable callback refs
+  const onRemoteStreamRef = useRef(onRemoteStream);
+  const onRemoteVideoToggleRef = useRef(onRemoteVideoToggle);
+  const onTimeoutRef = useRef(onTimeout);
+
+  useEffect(() => {
+    onRemoteStreamRef.current = onRemoteStream;
+    onRemoteVideoToggleRef.current = onRemoteVideoToggle;
+    onTimeoutRef.current = onTimeout;
+  }, [onRemoteStream, onRemoteVideoToggle, onTimeout]);
+
+  const countCandidate = useCallback((candStr: string) => {
+    setCandidateCounts(prev => {
+      let type: 'relay' | 'srflx' | 'host' = 'host';
+      if (candStr.includes('typ relay')) type = 'relay';
+      else if (candStr.includes('typ srflx')) type = 'srflx';
+      
+      return {
+        total: prev.total + 1,
+        relay: type === 'relay' ? prev.relay + 1 : prev.relay,
+        srflx: type === 'srflx' ? prev.srflx + 1 : prev.srflx,
+        host: type === 'host' ? prev.host + 1 : prev.host,
+      };
+    });
+  }, []);
 
   const stopLocalStream = useCallback(() => {
     if (localStreamRef.current) {
@@ -36,6 +76,12 @@ export const useWebRTC = (
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
+    retryCountRef.current = 0;
+    iceCandidateBufferRef.current = [];
+    hasRemoteDescriptionRef.current = false;
+    makingOfferRef.current = false;
+    ignoreOfferRef.current = false;
+
     if (peerConnectionRef.current) {
       peerConnectionRef.current.onicecandidate = null;
       peerConnectionRef.current.ontrack = null;
@@ -47,6 +93,8 @@ export const useWebRTC = (
     }
     setConnectionState('closed');
     setIceConnectionState('closed');
+    setCandidateCounts({ total: 0, relay: 0, srflx: 0, host: 0 });
+    setSelectedCandidatePair(null);
   }, []);
 
   const initLocalStream = useCallback(async () => {
@@ -54,7 +102,7 @@ export const useWebRTC = (
       stopLocalStream();
       const constraints = {
         audio: localMicId !== 'default' ? { deviceId: { exact: localMicId } } : true,
-        video: chatType === 'random_video' 
+        video: chatType === 'random_video'
           ? (localCamId !== 'default' ? { deviceId: { exact: localCamId } } : true)
           : false
       };
@@ -62,19 +110,53 @@ export const useWebRTC = (
       localStreamRef.current = stream;
       setLocalStream(stream);
 
-      // Apply initial toggled states
       stream.getAudioTracks().forEach(t => t.enabled = !isMuted);
       stream.getVideoTracks().forEach(t => t.enabled = !isCamOff);
 
       return stream;
     } catch (e) {
-      console.error("Failed to get local media stream", e);
+      console.error("[WebRTC] Failed to get local media stream", e);
       throw e;
     }
   }, [chatType, localMicId, localCamId, isMuted, isCamOff, stopLocalStream]);
 
-  const createPeerConnection = useCallback((_isCaller?: boolean) => {
+  const processIceBuffer = useCallback(async () => {
+    if (!peerConnectionRef.current || !hasRemoteDescriptionRef.current) return;
+    const candidates = [...iceCandidateBufferRef.current];
+    iceCandidateBufferRef.current = [];
+    for (const cand of candidates) {
+      try {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (e) {
+        if (!ignoreOfferRef.current) {
+          console.warn("[WebRTC] Error adding buffered ICE candidate", e);
+        }
+      }
+    }
+  }, []);
+
+  const updateCandidatePairStats = useCallback(async () => {
+    const pc = peerConnectionRef.current;
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          const localCand = stats.get(report.localCandidateId);
+          const remoteCand = stats.get(report.remoteCandidateId);
+          if (localCand && remoteCand) {
+            const pairInfo = `${localCand.candidateType} -> ${remoteCand.candidateType}`;
+            setSelectedCandidatePair(pairInfo);
+          }
+        }
+      });
+    } catch (e) {}
+  }, []);
+
+  const createPeerConnection = useCallback((isCaller: boolean = false) => {
     closePeerConnection();
+
+    politeRef.current = !isCaller; // Polite peer yields during offer collision
 
     const pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
@@ -88,50 +170,84 @@ export const useWebRTC = (
       });
     }
 
+    // Perfect Negotiation: Perfect negotiation offer creation on track add/change
+    pc.onnegotiationneeded = async () => {
+      try {
+        makingOfferRef.current = true;
+        await pc.setLocalDescription();
+        if (pc.localDescription && roomId) {
+          socket.emit("webrtc:offer", { roomId, offer: pc.localDescription });
+        }
+      } catch (err) {
+        console.error("[WebRTC Perfect Negotiation] Error in onnegotiationneeded", err);
+      } finally {
+        makingOfferRef.current = false;
+      }
+    };
+
     pc.onicecandidate = (event) => {
       if (event.candidate && roomId) {
+        countCandidate(event.candidate.candidate);
         socket.emit("webrtc:ice-candidate", { roomId, candidate: event.candidate });
       }
     };
 
     pc.ontrack = (event) => {
       if (event.streams && event.streams[0]) {
-        onRemoteStream(event.streams[0]);
+        onRemoteStreamRef.current(event.streams[0]);
 
         const remoteVideoTrack = event.streams[0].getVideoTracks()[0];
         if (remoteVideoTrack) {
-          onRemoteVideoToggle(remoteVideoTrack.enabled);
-          remoteVideoTrack.onmute = () => onRemoteVideoToggle(false);
-          remoteVideoTrack.onunmute = () => onRemoteVideoToggle(true);
+          onRemoteVideoToggleRef.current(remoteVideoTrack.enabled);
+          remoteVideoTrack.onmute = () => onRemoteVideoToggleRef.current(false);
+          remoteVideoTrack.onunmute = () => onRemoteVideoToggleRef.current(true);
         }
       }
     };
 
     pc.onconnectionstatechange = () => {
-      setConnectionState(pc.connectionState);
-      if (pc.connectionState === 'connected') {
+      if (!peerConnectionRef.current) return;
+      const state = peerConnectionRef.current.connectionState;
+      setConnectionState(state);
+      
+      if (state === 'connected') {
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        updateCandidatePairStats();
         socket.emit("webrtc:connected", { roomId });
-      }
-      if (pc.connectionState === 'failed') {
-        pc.restartIce();
+      } else if (state === 'failed') {
+        if (retryCountRef.current === 0) {
+          retryCountRef.current += 1;
+          console.warn("[WebRTC] Connection failed, attempting ICE restart...");
+          pc.restartIce();
+        } else {
+          console.error("[WebRTC] Connection failed after ICE restart.");
+          closePeerConnection();
+          onTimeoutRef.current();
+        }
       }
     };
 
     pc.oniceconnectionstatechange = () => {
-      setIceConnectionState(pc.iceConnectionState);
+      if (peerConnectionRef.current) {
+        const iceState = peerConnectionRef.current.iceConnectionState;
+        setIceConnectionState(iceState);
+        if (iceState === 'connected' || iceState === 'completed') {
+          updateCandidatePairStats();
+        }
+      }
     };
 
-    // 15 seconds connection watchdog timer
+    // 20 seconds connection watchdog timer
     timeoutRef.current = setTimeout(() => {
-      if (pc.connectionState !== 'connected') {
+      if (peerConnectionRef.current && peerConnectionRef.current.connectionState !== 'connected') {
+        console.warn("[WebRTC] Connection watchdog timeout expired.");
         closePeerConnection();
-        onTimeout();
+        onTimeoutRef.current();
       }
-    }, 15000);
+    }, 20000);
 
     return pc;
-  }, [roomId, onRemoteStream, onRemoteVideoToggle, onTimeout, closePeerConnection]);
+  }, [roomId, closePeerConnection, countCandidate, updateCandidatePairStats]);
 
   const toggleMute = useCallback(() => {
     if (localStreamRef.current) {
@@ -161,35 +277,70 @@ export const useWebRTC = (
 
     const handleOffer = async (data: { offer: RTCSessionDescriptionInit; senderId: string }) => {
       try {
-        const pc = peerConnectionRef.current || createPeerConnection(false);
-        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        const pc = peerConnectionRef.current;
+        if (!pc) return;
+
+        // Perfect Negotiation: Handle simultaneous offer collision (glare)
+        const offerCollision =
+          data.offer.type === "offer" &&
+          (makingOfferRef.current || pc.signalingState !== "stable");
+
+        ignoreOfferRef.current = !politeRef.current && offerCollision;
+        if (ignoreOfferRef.current) {
+          console.warn("[WebRTC Perfect Negotiation] Glare detected: impolite peer ignoring offer collision.");
+          return;
+        }
+
+        if (offerCollision && politeRef.current) {
+          console.log("[WebRTC Perfect Negotiation] Glare detected: polite peer rolling back local description.");
+          await Promise.all([
+            pc.setLocalDescription({ type: "rollback" }),
+            pc.setRemoteDescription(new RTCSessionDescription(data.offer))
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        }
+
+        hasRemoteDescriptionRef.current = true;
+        await processIceBuffer();
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket.emit("webrtc:answer", { roomId, answer });
+        socket.emit("webrtc:answer", { roomId, answer: pc.localDescription });
       } catch (e) {
-        console.error("Error setting offer or creating answer", e);
+        console.error("[WebRTC Perfect Negotiation] Error processing offer or creating answer", e);
       }
     };
 
     const handleAnswer = async (data: { answer: RTCSessionDescriptionInit; senderId: string }) => {
       try {
         const pc = peerConnectionRef.current;
-        if (pc) {
+        if (pc && !ignoreOfferRef.current) {
           await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+          hasRemoteDescriptionRef.current = true;
+          await processIceBuffer();
         }
       } catch (e) {
-        console.error("Error setting remote answer", e);
+        console.error("[WebRTC Perfect Negotiation] Error processing remote answer", e);
       }
     };
 
     const handleIceCandidate = async (data: { candidate: RTCIceCandidateInit; senderId: string }) => {
       try {
         const pc = peerConnectionRef.current;
-        if (pc) {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        if (data.candidate && data.candidate.candidate) {
+          countCandidate(data.candidate.candidate);
         }
+
+        if (!pc || !hasRemoteDescriptionRef.current) {
+          iceCandidateBufferRef.current.push(data.candidate);
+          return;
+        }
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
       } catch (e) {
-        // Safe to ignore candidate failures during ICE teardown
+        if (!ignoreOfferRef.current) {
+          console.warn("[WebRTC] Error adding ICE candidate", e);
+        }
       }
     };
 
@@ -202,7 +353,7 @@ export const useWebRTC = (
       socket.off("webrtc:answer", handleAnswer);
       socket.off("webrtc:ice-candidate", handleIceCandidate);
     };
-  }, [roomId, createPeerConnection]);
+  }, [roomId, processIceBuffer, countCandidate]);
 
   useEffect(() => {
     return () => {
@@ -217,6 +368,8 @@ export const useWebRTC = (
     isCamOff,
     connectionState,
     iceConnectionState,
+    candidateCounts,
+    selectedCandidatePair,
     initLocalStream,
     createPeerConnection,
     toggleMute,

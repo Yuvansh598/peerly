@@ -1,9 +1,30 @@
 import { API_URL } from '../config';
 import React, { useState, useEffect } from 'react';
 import { useAuthStore } from '../store';
-import { LogOut, User as UserIcon, MessageCircle, Settings, Users, Video, Mic, Camera, Trash2, ShieldAlert } from 'lucide-react';
+import { LogOut, User as UserIcon, MessageCircle, Settings, Users, Video, Mic, Camera, Trash2, ShieldAlert, Activity } from 'lucide-react';
 import { socket } from '../socket';
 import toast from 'react-hot-toast';
+
+interface DashboardStats {
+  onlineUsers: number;
+  searchingUsers: number;
+  usersInTextQueue: number;
+  usersInVoiceQueue: number;
+  usersInVideoQueue: number;
+  totalActiveRooms: number;
+  activeTextChats: number;
+  activeVoiceChats: number;
+  activeVideoChats: number;
+  matchesToday: number;
+  messagesToday: number;
+  dailyPeakUsers: number;
+  successfulConnections: number;
+  failedConnections: number;
+  averageMatchmakingTimeMs?: number;
+  averageSessionTime: number;
+  averageICECompletionTime?: number;
+  serverUptime: number;
+}
 
 export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (type?: 'random_text' | 'random_video' | 'random_voice', tags?: string[]) => void; onStartFriendChat: (friend: any) => void }) => {
   const { token, logout } = useAuthStore();
@@ -19,18 +40,34 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [tagsInput, setTagsInput] = useState('');
 
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+
   useEffect(() => {
     fetchProfile();
     
-    socket.on('presence:update', () => {
-      // Refresh friends list or update local state
+    if (!socket.connected && token) {
+      socket.auth = { token };
+      socket.connect();
+    }
+
+    socket.emit('dashboard:request-stats');
+
+    const handlePresenceUpdate = () => {
       fetchProfile();
-    });
+    };
+
+    const handleStatsUpdate = (data: DashboardStats) => {
+      setStats(data);
+    };
+
+    socket.on('presence:update', handlePresenceUpdate);
+    socket.on('dashboard:stats', handleStatsUpdate);
 
     return () => {
-      socket.off('presence:update');
+      socket.off('presence:update', handlePresenceUpdate);
+      socket.off('dashboard:stats', handleStatsUpdate);
     };
-  }, []);
+  }, [token]);
 
   const fetchProfile = async () => {
     if (!token) return;
@@ -106,7 +143,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
         toast.error("Failed to respond");
       }
     } catch (e) {
-      toast.error('Could not cancel request');
+      toast.error('Could not respond to request');
     }
   };
 
@@ -126,6 +163,15 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
     } catch (e) {
       toast.error('Cannot connect to server');
     }
+  };
+
+  const formatDurationSeconds = (seconds: number) => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
   };
 
   if (!profile) return (
@@ -150,16 +196,74 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
           <div className="text-2xl font-bold font-mono tracking-tighter">
             Peerly<span className="text-[var(--color-accent)]">.</span>
           </div>
-          <button onClick={logout} className="flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-danger)] transition-colors">
+          <button onClick={logout} className="flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-danger)] transition-colors cursor-pointer">
             <LogOut size={20} /> Logout
           </button>
+        </div>
+
+        {/* LIVE SYSTEM ANALYTICS DASHBOARD CARD */}
+        <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-6 relative overflow-hidden">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Activity className="text-[var(--color-accent)] animate-pulse" size={20} />
+              <h3 className="text-lg font-bold">Live System Metrics</h3>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] font-mono">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+              Real-time Socket Feed
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Online / Peak</div>
+              <div className="text-lg font-bold text-[#00f0ff]">{stats?.onlineUsers ?? 0} / {stats?.dailyPeakUsers ?? 0}</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Searching</div>
+              <div className="text-lg font-bold text-amber-400">{stats?.searchingUsers ?? 0}</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Queues (Text/Voice/Vid)</div>
+              <div className="text-sm font-semibold text-gray-300">
+                {stats?.usersInTextQueue ?? 0} / {stats?.usersInVoiceQueue ?? 0} / {stats?.usersInVideoQueue ?? 0}
+              </div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Active Rooms</div>
+              <div className="text-lg font-bold text-emerald-400">{stats?.totalActiveRooms ?? 0}</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Matches / Messages</div>
+              <div className="text-sm font-bold text-purple-400">{stats?.matchesToday ?? 0} / {stats?.messagesToday ?? 0}</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Avg Session</div>
+              <div className="text-sm font-bold text-cyan-300">{formatDurationSeconds(stats?.averageSessionTime ?? 0)}</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">ICE Setup Time</div>
+              <div className="text-sm font-bold text-indigo-300">{(stats?.averageICECompletionTime ?? 0)} ms</div>
+            </div>
+
+            <div className="bg-[var(--color-surface-raised)] border border-[var(--color-border)] p-3 rounded-xl flex flex-col items-center justify-center text-center">
+              <div className="text-xs text-[var(--color-text-secondary)] mb-1">Server Uptime</div>
+              <div className="text-xs font-mono font-bold text-gray-400">{formatDurationSeconds(stats?.serverUptime ?? 0)}</div>
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           
           {/* PROFILE CELL */}
           <div className="col-span-1 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl p-6 relative">
-            <button onClick={() => setIsEditing(!isEditing)} className="absolute top-6 right-6 text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]">
+            <button onClick={() => setIsEditing(!isEditing)} className="absolute top-6 right-6 text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] cursor-pointer">
               <Settings size={20} />
             </button>
             
@@ -204,14 +308,14 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
                   <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Display Name" className="bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-2 rounded-lg outline-none focus:border-[var(--color-accent)] w-full" />
                   <textarea value={bio} onChange={e => setBio(e.target.value)} placeholder="Bio" className="bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-2 rounded-lg outline-none focus:border-[var(--color-accent)] text-sm h-24 w-full" />
                   <div className="flex gap-2 w-full mt-2">
-                    <button type="button" onClick={() => setIsEditing(false)} className="flex-1 border border-[var(--color-border)] py-2 rounded-lg text-sm transition-colors hover:bg-[var(--color-border)]">Cancel</button>
-                    <button type="submit" className="flex-1 bg-[var(--color-accent)] text-[var(--color-bg)] font-bold py-2 rounded-lg text-sm transition-transform hover:scale-105">Save Changes</button>
+                    <button type="button" onClick={() => setIsEditing(false)} className="flex-1 border border-[var(--color-border)] py-2 rounded-lg text-sm transition-colors hover:bg-[var(--color-border)] cursor-pointer">Cancel</button>
+                    <button type="submit" className="flex-1 bg-[var(--color-accent)] text-[var(--color-bg)] font-bold py-2 rounded-lg text-sm transition-transform hover:scale-105 cursor-pointer">Save Changes</button>
                   </div>
                   
                   <div className="w-full h-px bg-[var(--color-border)] my-4"></div>
                   
                   {!showDeleteConfirm ? (
-                    <button type="button" onClick={() => setShowDeleteConfirm(true)} className="w-full flex justify-center items-center gap-2 text-sm text-[var(--color-danger)] py-2 hover:bg-[var(--color-danger)]/10 rounded-lg transition-colors">
+                    <button type="button" onClick={() => setShowDeleteConfirm(true)} className="w-full flex justify-center items-center gap-2 text-sm text-[var(--color-danger)] py-2 hover:bg-[var(--color-danger)]/10 rounded-lg transition-colors cursor-pointer">
                       <Trash2 size={16} /> Delete Account
                     </button>
                   ) : (
@@ -219,8 +323,8 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
                       <ShieldAlert size={24} className="text-[var(--color-danger)] mb-2" />
                       <p className="text-sm text-center mb-3 text-[var(--color-danger)]">Are you absolutely sure? This cannot be undone.</p>
                       <div className="flex gap-2 w-full">
-                        <button type="button" onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-[var(--color-danger)]/30 text-[var(--color-danger)] py-1.5 rounded text-sm hover:bg-[var(--color-danger)]/10">Cancel</button>
-                        <button type="button" onClick={handleDeleteProfile} className="flex-1 bg-[var(--color-danger)] text-white font-bold py-1.5 rounded text-sm hover:bg-red-600 transition-colors">Confirm Delete</button>
+                        <button type="button" onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-[var(--color-danger)]/30 text-[var(--color-danger)] py-1.5 rounded text-sm hover:bg-[var(--color-danger)]/10 cursor-pointer">Cancel</button>
+                        <button type="button" onClick={handleDeleteProfile} className="flex-1 bg-[var(--color-danger)] text-white font-bold py-1.5 rounded text-sm hover:bg-red-600 transition-colors cursor-pointer">Confirm Delete</button>
                       </div>
                     </div>
                   )}
@@ -237,7 +341,7 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
               <div className="absolute top-0 right-0 w-64 h-64 bg-[var(--color-accent)] opacity-5 blur-[100px] rounded-full pointer-events-none" />
               <div>
                 <h3 className="text-2xl font-bold mb-2">Ready to meet someone new?</h3>
-                <p className="text-[var(--color-text-secondary)]">Jump right into a random text or video chat anonymously.</p>
+                <p className="text-[var(--color-text-secondary)]">Jump right into a random text, voice or video chat anonymously.</p>
               </div>
               <div className="flex flex-col gap-3 z-10 w-full md:w-auto items-stretch">
                 <input 
@@ -251,21 +355,21 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
                   <button onClick={() => {
                     const tags = tagsInput.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
                     onStartChat('random_text', tags);
-                  }} className="bg-[var(--color-accent)] text-[var(--color-bg)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[#33dfff] transition-all hover:scale-105 shadow-[0_0_20px_rgba(0,255,255,0.2)] whitespace-nowrap flex-1">
+                  }} className="bg-[var(--color-accent)] text-[var(--color-bg)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[#33dfff] transition-all hover:scale-105 shadow-[0_0_20px_rgba(0,255,255,0.2)] whitespace-nowrap flex-1 cursor-pointer">
                     <MessageCircle size={20} />
                     Text Chat
                   </button>
                   <button onClick={() => {
                     const tags = tagsInput.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
                     onStartChat('random_voice', tags);
-                  }} className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-all hover:scale-105 whitespace-nowrap flex-1">
+                  }} className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-all hover:scale-105 whitespace-nowrap flex-1 cursor-pointer">
                     <Mic size={20} />
                     Voice Chat
                   </button>
                   <button onClick={() => {
                     const tags = tagsInput.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
                     onStartChat('random_video', tags);
-                  }} className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-all hover:scale-105 whitespace-nowrap flex-1">
+                  }} className="bg-[var(--color-surface-raised)] border border-[var(--color-accent)] text-[var(--color-text-primary)] font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--color-accent)] hover:text-[var(--color-bg)] transition-all hover:scale-105 whitespace-nowrap flex-1 cursor-pointer">
                     <Video size={20} />
                     Video Chat
                   </button>
@@ -340,13 +444,13 @@ export const Dashboard = ({ onStartChat, onStartFriendChat }: { onStartChat: (ty
                           <div className="px-4 pb-4 flex gap-2 mt-auto">
                             <button 
                               onClick={() => respondToRequest(f.id, 'accepted')} 
-                              className="flex-1 bg-[var(--color-accent)] text-[var(--color-bg)] py-2 rounded-lg text-sm font-bold hover:bg-[#33dfff] transition-colors"
+                              className="flex-1 bg-[var(--color-accent)] text-[var(--color-bg)] py-2 rounded-lg text-sm font-bold hover:bg-[#33dfff] transition-colors cursor-pointer"
                             >
                               Confirm
                             </button>
                             <button 
                               onClick={() => respondToRequest(f.id, 'declined')} 
-                              className="flex-1 bg-[#3A3B40] text-[var(--color-text-primary)] py-2 rounded-lg text-sm font-bold hover:bg-[#4A4B50] transition-colors"
+                              className="flex-1 bg-[#3A3B40] text-[var(--color-text-primary)] py-2 rounded-lg text-sm font-bold hover:bg-[#4A4B50] transition-colors cursor-pointer"
                             >
                               Delete
                             </button>

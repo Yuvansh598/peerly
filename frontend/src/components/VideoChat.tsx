@@ -23,11 +23,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 type PipCorner = 'tl' | 'tr' | 'bl' | 'br';
 
-export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: { guest: any; onLeave: () => void; tags?: string[], type?: 'random_video' | 'random_voice' }) => {
+export const VideoChat = ({ guest: _guest, onLeave, tags = [], type = 'random_video' }: { guest: any; onLeave: () => void; tags?: string[], type?: 'random_video' | 'random_voice' }) => {
   const { isMobile } = useResponsive();
   const { socket, isConnected, isReconnecting } = useSocket();
   
-  // Media device state management
   const {
     devices,
     activeAudioInput,
@@ -53,7 +52,6 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // WebRTC Stats tracking
   const [stats, setStats] = useState<WebRTCStats>({
     socketConnected: socket.connected,
     roomId: null,
@@ -66,18 +64,23 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     remoteMedia: false,
   });
 
+  const skipMatchRef = useRef<(() => void) | null>(null);
+
   const onTimeout = useCallback(() => {
     toast.error("WebRTC connection negotiation timed out. Rematching...");
-    handleSkip();
+    if (skipMatchRef.current) {
+      skipMatchRef.current();
+    }
   }, []);
 
-  // WebRTC custom hook usage
   const {
     localStream,
     isMuted,
     isCamOff,
     connectionState,
     iceConnectionState,
+    candidateCounts,
+    selectedCandidatePair,
     initLocalStream,
     createPeerConnection,
     toggleMute,
@@ -102,45 +105,49 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     onTimeout
   );
 
-  // Matchmaking custom hook usage
+  const handleSessionStart = useCallback(async (data: { roomId: string; partnerId: string; sessionId: string; partnerUsername: string; isCaller: boolean }) => {
+    setPartnerUsernameState(data.partnerUsername);
+    setStats(prev => ({
+      ...prev,
+      roomId: data.roomId,
+      role: data.isCaller ? 'Caller' : 'Callee'
+    }));
+    setStartTime(Date.now());
+    
+    try {
+      await initLocalStream();
+      const pc = createPeerConnection(data.isCaller);
+
+      if (data.isCaller) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc:offer', { roomId: data.roomId, offer });
+      }
+    } catch (e) {
+      console.error("[VideoChat] Failed initializing local media or creating offer", e);
+    }
+  }, [initLocalStream, createPeerConnection, socket]);
+
+  const handleSessionEnd = useCallback((_reason: string) => {
+    closePeerConnection();
+  }, [closePeerConnection]);
+
   const {
     matchStatus,
     roomId,
     startSearch,
     skipMatch,
     leaveChat
-  } = useMatchmaking(
-    type,
-    tags,
-    async (data) => {
-      setPartnerUsernameState(data.partnerUsername);
-      setStats(prev => ({
-        ...prev,
-        roomId: data.roomId,
-        role: guest.id > data.partnerId ? 'Caller' : 'Callee'
-      }));
-      setStartTime(Date.now());
-      
-      await initLocalStream();
-      const isCaller = guest.id > data.partnerId;
-      const pc = createPeerConnection(isCaller);
+  } = useMatchmaking(type, tags, handleSessionStart, handleSessionEnd);
 
-      if (isCaller) {
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit('webrtc:offer', { roomId: data.roomId, offer });
-        } catch (e) {
-          console.error("Failed to create WebRTC offer", e);
-        }
-      }
-    },
-    (_reason) => {
+  useEffect(() => {
+    skipMatchRef.current = () => {
       closePeerConnection();
-    }
-  );
+      stopLocalStream();
+      skipMatch();
+    };
+  }, [closePeerConnection, stopLocalStream, skipMatch]);
 
-  // Sync state to visual debugging panel
   useEffect(() => {
     setStats(prev => ({
       ...prev,
@@ -149,18 +156,18 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
       signalingState: stats.signalingState,
       iceState: iceConnectionState,
       connectionState: connectionState,
+      candidates: candidateCounts,
+      selectedCandidatePair,
       localMedia: !!localStream,
     }));
-  }, [isConnected, roomId, connectionState, iceConnectionState, localStream]);
+  }, [isConnected, roomId, connectionState, iceConnectionState, candidateCounts, selectedCandidatePair, localStream]);
 
-  // Sync local preview stream
   useEffect(() => {
     if (localVideoRef.current && localStream && type === 'random_video') {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream, type]);
 
-  // Initialize media device permissions and start search
   useEffect(() => {
     requestPermissions(type === 'random_video').then((granted) => {
       if (granted) {
@@ -176,7 +183,6 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     };
   }, []);
 
-  // Controls Autohide timer logic
   const resetControlsTimeout = useCallback(() => {
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -199,7 +205,6 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
     };
   }, [matchStatus, resetControlsTimeout]);
 
-  // Audio/Video toggles with toast notifications
   const handleToggleMute = () => {
     toggleMute();
     toast.success(isMuted ? "Microphone active" : "Microphone muted");
@@ -232,7 +237,6 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
         (remoteVideoRef.current as any).setSinkId(deviceId);
       }
     }
-    // Re-initialize local media with new choice
     setTimeout(async () => {
       await initLocalStream();
     }, 100);
@@ -264,10 +268,8 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
       onClick={resetControlsTimeout}
       onTouchStart={resetControlsTimeout}
     >
-      {/* Visual Debug stats panel */}
       <WebRTCDebugPanel stats={stats} />
       
-      {/* Reconnecting Overlay state */}
       {isReconnecting && (
         <div className="absolute inset-0 bg-black/80 backdrop-blur-md z-50 flex flex-col items-center justify-center gap-4">
           <RefreshCw className="animate-spin text-[#00f0ff] w-10 h-10" />
@@ -328,13 +330,11 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
         <PartnerInfoCard partnerUsername={partnerUsernameState} tags={tags} connectionState={connectionState} />
       )}
 
-      {/* VIDEO / VOICE INTERACTION MEDIA DISPLAY */}
+      {/* MEDIA DISPLAY */}
       <div className="flex-1 relative w-full h-full flex items-center justify-center">
         {isVoice ? (
-          // VOICE LAYOUT RENDER
           <div className="absolute inset-0 bg-gradient-to-br from-[#070913] via-[#0d1121] to-[#070913] flex flex-col items-center justify-center p-6">
             <div className="relative mb-8">
-              {/* Audio Rings */}
               <Avatar username={partnerUsernameState || '?'} size="xl" speaking={connectionState === 'connected'} />
             </div>
 
@@ -351,9 +351,7 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
             <audio ref={remoteVideoRef} autoPlay />
           </div>
         ) : (
-          // VIDEO LAYOUT RENDER
           <>
-            {/* Full screen main view (remote stream, or local if swapped) */}
             <div className="absolute inset-0 bg-[#070913]">
               <video ref={isSwapped ? localVideoRef : remoteVideoRef} autoPlay playsInline className={clsx("w-full h-full object-cover", isSwapped && "transform scale-x-[-1]")} />
               
@@ -367,7 +365,6 @@ export const VideoChat = ({ guest, onLeave, tags = [], type = 'random_video' }: 
               )}
             </div>
 
-            {/* Draggable PiP View (local feed or remote if swapped) */}
             <div 
               onClick={(e) => { e.stopPropagation(); cyclePipCorner(); }}
               onDoubleClick={(e) => { e.stopPropagation(); setIsSwapped(!isSwapped); }}
